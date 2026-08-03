@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plannotator Extension Harness</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 32px;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+
+      .layout {
+        max-width: 960px;
+        margin: 0 auto;
+        display: grid;
+        gap: 20px;
+      }
+
+      article[data-message-author-role="assistant"] {
+        background: white;
+        border: 1px solid #cbd5e1;
+        border-radius: 20px;
+        padding: 24px;
+        line-height: 1.7;
+        font-size: 16px;
+      }
+
+      .composer {
+        background: white;
+        border: 1px solid #cbd5e1;
+        border-radius: 20px;
+        padding: 16px;
+      }
+
+      #prompt-textarea {
+        min-height: 140px;
+        border: 1px solid #cbd5e1;
+        border-radius: 14px;
+        padding: 12px;
+        outline: 0;
+        white-space: pre-wrap;
+      }
+
+      button {
+        margin-top: 12px;
+        border: 0;
+        border-radius: 12px;
+        background: #1d4ed8;
+        color: white;
+        font-weight: 700;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      pre {
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 16px;
+        padding: 16px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <article data-message-author-role="assistant">
+        <p>We should keep the system fast by enforcing latency budgets per request stage. The routing layer needs a hard ceiling, the cache layer should absorb most repeated traffic, and the fallback path must stay narrow.</p>
+        <p>Right now the answer is too vague about latency budgets and does not specify exact thresholds or the tradeoff between throughput and correctness.</p>
+      </article>
+
+      <div class="composer">
+        <div id="prompt-textarea" contenteditable="true" role="textbox" aria-multiline="true"></div>
+        <button type="button" data-testid="send-button" id="send-button">Send</button>
+      </div>
+
+      <pre id="sent-output">Nothing sent yet.</pre>
+    </div>
+
+    <script>
+      const composer = document.getElementById("prompt-textarea");
+      const sendButton = document.getElementById("send-button");
+      const sentOutput = document.getElementById("sent-output");
+
+      composer.addEventListener("input", () => {
+        sendButton.disabled = composer.textContent.trim().length === 0;
+      });
+
+      sendButton.disabled = true;
+
+      sendButton.addEventListener("click", () => {
+        sentOutput.textContent = composer.textContent;
+        composer.textContent = "";
+        sendButton.disabled = true;
+      });
+    </script>
+  </body>
+  </html>

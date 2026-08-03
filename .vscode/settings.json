@@ -1,0 +1,5 @@
+  {
+      "svelte.language-server.runtime": "/opt/homebrew/bin/node",
+      "eslint.runtime": "/opt/homebrew/bin/node",
+      "prettier.nodePath": "/opt/homebrew/bin/node"
+  }
