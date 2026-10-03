@@ -6,12 +6,17 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "dev": "bun run scripts/dev.ts",
+    "test:dom": "bun test test/dom-compatibility.test.ts",
     "e2e": "bun run test/e2e.ts",
     "e2e:dev-reload": "bun run test/dev-reload.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test:queue": "bun test test/queue-store.test.ts",
+    "reload": "bun run scripts/reload.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "fake-indexeddb": "^6.2.5",
+    "happy-dom": "^20.14.5",
     "puppeteer-core": "^24.8.0",
     "typescript": "^5.8.2"
   }

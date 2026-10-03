@@ -7,11 +7,6 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
 export const appDir = resolve(scriptsDir, "..");
 export const distDir = resolve(appDir, "dist");
 export const defaultDevPort = Number(process.env.PLANNOTATOR_EXTENSION_DEV_PORT ?? "19445");
-const devReloadHosts = [
-  "https://chatgpt.com/*",
-  "http://127.0.0.1/*",
-  "http://localhost/*",
-];
 
 interface BuildExtensionOptions {
   dev?: boolean;
@@ -26,16 +21,17 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
 
   mkdirSync(distDir, { recursive: true });
 
-  const entrypoints = [resolve(appDir, "src/content.ts")];
-  if (dev) {
-    entrypoints.push(resolve(appDir, "src/dev-worker.ts"));
-  }
+  const entrypoints = [
+    resolve(appDir, "src/content.ts"),
+    resolve(appDir, "src/queue-ui.ts"),
+    resolve(appDir, "src/queue-worker.ts"),
+  ];
 
   const result = await Bun.build({
     entrypoints,
     outdir: distDir,
     target: "browser",
-    format: "esm",
+    format: "iife",
     minify: !dev,
     sourcemap: "linked",
     naming: {
@@ -56,16 +52,13 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
   }
 
   const manifest = await loadManifest();
+  manifest.background = { service_worker: "queue-worker.js", type: "module" };
+  delete manifest.permissions;
   if (dev) {
-    manifest.background = {
-      service_worker: "dev-worker.js",
-      type: "module",
-    };
-    manifest.permissions = uniqueStrings(manifest.permissions, ["storage", "tabs", "scripting"]);
-    manifest.host_permissions = uniqueStrings(manifest.host_permissions, [...devReloadHosts, `${devOrigin}/*`]);
+    // Only the worker contacts the local build server. Reloading needs no
+    // tabs, scripting, or storage permissions and never forces busy pages.
+    manifest.host_permissions = [`${devOrigin}/*`];
   } else {
-    delete manifest.background;
-    delete manifest.permissions;
     delete manifest.host_permissions;
   }
 
@@ -83,20 +76,4 @@ async function loadManifest(): Promise<Record<string, unknown>> {
 
 function normalizeDevOrigin(origin: string): string {
   return origin.replace(/\/+$/, "");
-}
-
-function uniqueStrings(value: unknown, extras: string[]): string[] {
-  const seen = new Set<string>();
-  const combined = [
-    ...(Array.isArray(value) ? value : []),
-    ...extras,
-  ];
-
-  for (const entry of combined) {
-    if (typeof entry === "string" && entry.trim()) {
-      seen.add(entry);
-    }
-  }
-
-  return [...seen];
 }

@@ -8,7 +8,7 @@ const devOrigin = `http://127.0.0.1:${devPort}`;
 const versionPath = "/__plannotator/version";
 const rebuildPath = "/__plannotator/rebuild";
 const corsHeaders = {
-  "access-control-allow-origin": "*",
+  "access-control-allow-origin": devOrigin,
   "access-control-allow-methods": "GET,POST,OPTIONS",
   "access-control-allow-headers": "content-type",
 };
@@ -32,6 +32,10 @@ const server = Bun.serve({
       headers: corsHeaders,
     }),
     [rebuildPath]: async (request) => {
+      const origin = request.headers.get("origin");
+      if (origin && origin !== devOrigin) {
+        return new Response("origin not allowed\n", { status: 403 });
+      }
       if (request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,

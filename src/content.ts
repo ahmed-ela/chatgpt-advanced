@@ -1,4 +1,9 @@
-type ComposerElement = HTMLTextAreaElement | HTMLInputElement | HTMLElement;
+import {
+  findQueueComposer, readComposer, writeComposer, findQueueSendButton, isChatBusy, hasComposerAttachments,
+  getAssistantMessageElements, findAssistantMessageElement, getAssistantMessageId, getProviderName,
+} from "./chatgpt-dom";
+
+type ComposerElement = HTMLTextAreaElement | HTMLElement;
 type NoteSide = "left" | "right";
 type ActionFeedbackState = "idle" | "loading" | "inserted";
 
@@ -122,12 +127,17 @@ function bootstrap(): void {
     });
   }, true);
 
-  document.addEventListener("keydown", (event) => {
+  // Native apps may treat the shadow host as a non-input and redirect typing
+  // into their composer. Handle our editor before their document listeners.
+  window.addEventListener("keydown", (event) => {
     const origin = event.composedPath()[0];
     const target = origin instanceof HTMLElement ? origin : null;
+    const noteField = (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) &&
+      target.getRootNode() === ui.shadow;
+    if (noteField) event.stopImmediatePropagation();
     const draftField = (
       target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement
-    ) && target.dataset.field === "draft";
+    ) && noteField && target.dataset.field === "draft";
 
     if (event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey) {
       const key = event.key.toLowerCase();
@@ -157,6 +167,9 @@ function bootstrap(): void {
 
     if (draftField && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      // Some editor/automation paths emit a non-composed input event. The
+      // focused textarea is authoritative even if no input event escaped it.
+      state.draftText = target.value;
       commitDraftNote();
       render(ui);
       return;
@@ -233,7 +246,7 @@ function startDevHotReload(): void {
       chrome?: {
         runtime?: {
           onMessage?: {
-            addListener?: (callback: (message: { type?: string; buildId?: string }) => void) => void;
+            addListener?: (callback: (message: { type?: string; buildId?: string }, sender?: unknown, respond?: (reply: unknown) => void) => void) => void;
           };
           sendMessage?: (message: unknown) => Promise<unknown> | void;
         };
@@ -245,62 +258,89 @@ function startDevHotReload(): void {
   const sendMessage = runtime.sendMessage.bind(runtime);
   setDevReloadState("polling");
 
-  let pendingReload = false;
+  let polling = false;
+  let needsPageReload = false;
   let reloadTimer = 0;
 
-  const schedulePageReload = (delayMs = 220): void => {
+  const safeToReload = (): boolean => {
+    const composer = findQueueComposer();
+    const noteShadow = document.getElementById(ROOT_ID)?.shadowRoot;
+    const queueHost = document.getElementById("plannotator-message-queue");
+    const queueShadow = queueHost?.shadowRoot;
+    return Boolean(composer && !readComposer(composer).trim() && !isChatBusy() && !hasComposerAttachments() &&
+      !state.draftEditorOpen && !state.draftText.trim() && !persistTimer && state.actionFeedback !== "loading" &&
+      !noteShadow?.querySelector("textarea") && queueHost?.getAttribute("data-reload-blocked") !== "true" &&
+      !queueShadow?.querySelector("textarea, button[data-action='enqueue']:disabled"));
+  };
+
+  const schedulePageReload = (delayMs = 420): void => {
     if (reloadTimer) return;
+    if (!safeToReload()) { setDevReloadState("waiting-for-idle"); return; }
     setDevReloadState("page-reload-scheduled");
     reloadTimer = window.setTimeout(() => {
+      reloadTimer = 0;
+      // A draft, response, attachment, or editor may have appeared since the
+      // worker accepted the reload. Keep this document alive until safe again.
+      if (!safeToReload()) { setDevReloadState("waiting-for-idle"); return; }
       setDevReloadState("page-reloading");
       window.location.reload();
     }, delayMs);
   };
 
-  runtime.onMessage?.addListener?.((message) => {
+  runtime.onMessage?.addListener?.((message, _sender, respond) => {
+    if (message?.type === "plannotator:dev-can-reload") {
+      respond?.({ ok: true, safe: safeToReload() });
+      return;
+    }
     if (message?.type !== "plannotator:dev-page-reload") {
       return;
     }
 
-    pendingReload = true;
+    needsPageReload = true;
     setDevReloadState("page-reload-message");
     schedulePageReload();
   });
 
   const poll = async (): Promise<void> => {
-    if (pendingReload) return;
-
+    if (polling || reloadTimer) return;
+    if (needsPageReload) { schedulePageReload(); return; }
+    polling = true;
     try {
-      const response = await fetch(`${DEV_ORIGIN}${DEV_VERSION_PATH}?t=${Date.now()}`, {
-        cache: "no-store",
-      });
-
-      if (!response.ok) return;
-
-      const payload = await response.json() as { buildId?: string };
-      if (!payload.buildId || payload.buildId === DEV_BUILD_ID) {
+      // The extension worker owns localhost access, avoiding page CORS and
+      // ChatGPT's local-network permission prompts.
+      const payload = await sendMessage({ type: "plannotator:dev-version" }) as { buildId?: string; workerBuildId?: string } | undefined;
+      if (!payload?.buildId || payload.buildId === "booting" ||
+          (payload.buildId === DEV_BUILD_ID && payload.workerBuildId === DEV_BUILD_ID)) {
         return;
       }
-
-      pendingReload = true;
-      setDevReloadState(`build-change:${payload.buildId}`);
-      try {
-        void Promise.resolve(sendMessage({
-          type: "plannotator:dev-reload",
-          buildId: payload.buildId,
-        })).catch(() => {
-          pendingReload = false;
-          setDevReloadState("reload-request-failed");
-        });
-        setDevReloadState(`reload-requested:${payload.buildId}`);
-        schedulePageReload(runtime.onMessage?.addListener ? 420 : 260);
-      } catch {
-        pendingReload = false;
-        setDevReloadState("reload-request-threw");
+      if (payload.workerBuildId === payload.buildId) {
+        // Another tab already installed this build. Refresh only this stale
+        // document; another runtime reload would invalidate updated tabs again.
+        needsPageReload = true;
+        setDevReloadState(`worker-current:${payload.buildId}`);
+        schedulePageReload();
+        return;
       }
-    } catch {
-      // Dev server is optional; keep the production path silent.
-    }
+      if (!safeToReload()) { setDevReloadState("waiting-for-idle"); return; }
+      setDevReloadState(`build-change:${payload.buildId}`);
+      const reply = await sendMessage({ type: "plannotator:dev-reload", buildId: payload.buildId }) as { ok?: boolean; scheduled?: boolean } | undefined;
+      if (reply?.ok && reply.scheduled === false) { setDevReloadState("waiting-for-other-tabs"); return; }
+      if (reply?.ok && reply.scheduled === true) {
+        setDevReloadState(`reload-requested:${payload.buildId}`);
+        // Scheduling is not proof that the global update happened: another
+        // tab may become busy before the worker's final safety check. Wait for
+        // its new build ID (or context invalidation) before refreshing here.
+      }
+    } catch (error) {
+      // Another tab can reload the worker first, invalidating this old content
+      // script. Its safe page refresh reconnects even though messaging is dead.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/context invalidated/i.test(message)) {
+        needsPageReload = true;
+        schedulePageReload();
+      }
+      // An absent dev server or other transient failure does not refresh a tab.
+    } finally { polling = false; }
   };
 
   void poll();
@@ -703,21 +743,31 @@ function createUi(): UiRefs {
     return;
   });
 
-  shadow.addEventListener("input", (event) => {
-    const target = event.target as HTMLTextAreaElement | HTMLInputElement | null;
-    if (!target) return;
-
-    if (target.dataset.field === "draft") {
-      state.draftText = target.value;
-      autosizeNoteField(target);
-      return;
+  const updateNoteField = (target: HTMLTextAreaElement | HTMLInputElement): void => {
+    if (target.dataset.field === "draft") state.draftText = target.value;
+    else {
+      const noteId = target.closest<HTMLElement>("[data-note-id]")?.dataset.noteId;
+      if (noteId) updateNote(noteId, { comment: target.value });
     }
-
-    const noteId = target.closest<HTMLElement>("[data-note-id]")?.dataset.noteId;
-    if (!noteId) return;
-    updateNote(noteId, { comment: target.value });
     autosizeNoteField(target);
+  };
+  // Non-composed input events never reach the window. Keep a shadow-local
+  // fallback; composed events are handled and stopped by window capture.
+  shadow.addEventListener("input", (event) => {
+    const target = event.composedPath()[0];
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) updateNoteField(target);
   });
+  for (const type of ["keypress", "keyup", "beforeinput", "input", "paste", "copy", "cut"]) {
+    window.addEventListener(type, (event) => {
+      const target = event.composedPath()[0];
+      if (!(target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) || target.getRootNode() !== shadow) return;
+      // Keep default textarea editing/paste behavior while preventing native
+      // document-capture shortcuts from treating our shadow host as the page.
+      event.stopImmediatePropagation();
+      if (type !== "input") return;
+      updateNoteField(target);
+    }, true);
+  }
 
   return ui;
 }
@@ -797,8 +847,8 @@ function renderActions(ui: UiRefs): void {
       class="notes-action${isLoading ? " loading" : ""}${isSuccess ? " success" : ""}"
       data-action="insert-notes"
       type="button"
-      title="${isLoading ? "Inserting into ChatGPT" : isSuccess ? "Inserted into ChatGPT" : "Insert notes into ChatGPT"}"
-      aria-label="${isLoading ? "Inserting into ChatGPT" : isSuccess ? "Inserted into ChatGPT" : "Insert notes into ChatGPT"}"
+      title="${isLoading ? "Inserting into" : isSuccess ? "Inserted into" : "Insert notes into"} ${getProviderName()}"
+      aria-label="${isLoading ? "Inserting into" : isSuccess ? "Inserted into" : "Insert notes into"} ${getProviderName()}"
       data-state="${isLoading ? "loading" : isSuccess ? "success" : "idle"}"
       ${isLoading || isSuccess ? "disabled" : ""}
     >
@@ -1137,9 +1187,13 @@ async function insertPrompt(ui: UiRefs): Promise<void> {
   await nextPaint();
 
   const prompt = buildPrompt();
+  if (!setComposerText(composer, prompt)) {
+    clearActionFeedback();
+    render(ui);
+    return;
+  }
   clearAllNotes();
   flushPersistedConversationState();
-  setComposerText(composer, prompt);
   showInsertSuccess(ui);
   render(ui);
 }
@@ -1238,6 +1292,9 @@ function flushPersistedConversationState(options: { preserveExistingOnEmpty?: bo
 }
 
 function queueNativeSendClear(ui: UiRefs, trigger: "button" | "enter" | "submit"): void {
+  // An automatic queued send may be unrelated to annotations currently being
+  // collected. Keep those notes until the user inserts or sends them.
+  if (findComposer()?.hasAttribute("data-plannotator-queued-send")) return;
   if (state.notes.length === 0) return;
 
   if (trigger === "enter" && !canComposerSend()) {
@@ -1262,40 +1319,15 @@ function hasNativeSendButtonInPath(path: Array<EventTarget | undefined>): boolea
 }
 
 function canComposerSend(): boolean {
+  if (isChatBusy()) return false;
   const composer = findComposer();
   const composerText = composer ? normalizePromptMatch(getComposerText(composer)) : "";
-  if (composerText) {
-    return true;
-  }
-
-  const sendButton = document.querySelector<HTMLElement>([
-    "#composer-submit-button",
-    "#send-button",
-    "[data-testid='send-button']",
-    "button[aria-label='Send prompt']",
-    "button[aria-label='Send message']",
-    "button[aria-label='Send']",
-  ].join(","));
-
-  if (!sendButton) {
-    return false;
-  }
-
-  const ariaDisabled = sendButton.getAttribute("aria-disabled");
-  const isDisabled = sendButton instanceof HTMLButtonElement ? sendButton.disabled : false;
-  return !isDisabled && ariaDisabled !== "true";
+  return Boolean(composerText || findQueueSendButton());
 }
 
 function isNativeSendButton(target: Element): boolean {
-  return Boolean(target.closest([
-    "#composer-submit-button",
-    "#send-button",
-    "[data-testid='send-button']",
-    "button[aria-label='Send prompt']",
-    "button[aria-label='Send message']",
-    "button[aria-label='Send']",
-    "button[class*='send']",
-  ].join(",")));
+  const button = findQueueSendButton();
+  return Boolean(button && (button === target || button.contains(target)));
 }
 
 function isNativeComposerSendKey(event: KeyboardEvent): boolean {
@@ -1312,79 +1344,22 @@ function isNativeComposerSendKey(event: KeyboardEvent): boolean {
   const composer = findComposer();
   if (!composer) return false;
 
-  if (target === composer) return true;
-  if (composer instanceof HTMLElement && composer.contains(target)) {
-    return true;
-  }
-
-  return Boolean(target.closest([
-    "#prompt-textarea",
-    "[data-testid='prompt-textarea']",
-    "form[data-type='unified-composer']",
-    "form.group\\/composer",
-  ].join(",")));
+  return target === composer || composer.contains(target);
 }
 
 
 function findComposer(): ComposerElement | null {
-  const selectors = [
-    "form[data-type='unified-composer'] #prompt-textarea",
-    "form.group\\/composer #prompt-textarea",
-    "[data-composer-surface='true'] #prompt-textarea",
-    "#prompt-textarea",
-    "[data-testid='prompt-textarea']",
-    "div[contenteditable='true'][id='prompt-textarea']",
-    "div[contenteditable='true'][data-testid='prompt-textarea']",
-    "form[data-type='unified-composer'] textarea",
-    "form.group\\/composer textarea",
-    "form[data-type='unified-composer'] div[contenteditable='true']",
-    "form.group\\/composer div[contenteditable='true']",
-  ];
-
-  for (const selector of selectors) {
-    const element = document.querySelector(selector);
-    if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
-      return element;
-    }
-    if (element instanceof HTMLElement && element.isContentEditable) {
-      return element;
-    }
-  }
-
-  return null;
+  return findQueueComposer();
 }
 
 function getComposerText(element: ComposerElement): string {
-  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
-    return element.value;
-  }
-
-  return element.textContent ?? "";
+  return readComposer(element);
 }
 
-function setComposerText(element: ComposerElement, value: string): void {
-  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
-    const prototype = Object.getPrototypeOf(element) as { value?: PropertyDescriptor };
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-    descriptor?.set?.call(element, value);
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    element.focus();
-    return;
-  }
-
-  element.focus();
-  selectContent(element);
-  const inserted = document.execCommand("insertText", false, value);
-  if (!inserted) {
-    element.textContent = value;
-    element.dispatchEvent(new InputEvent("input", {
-      bubbles: true,
-      cancelable: true,
-      data: value,
-      inputType: "insertText",
-    }));
-  }
+function setComposerText(element: ComposerElement, value: string): boolean {
+  const inserted = writeComposer(element, value);
+  if (inserted) element.focus();
+  return inserted;
 }
 
 function jumpToNote(noteId: string, ui: UiRefs): void {
@@ -1597,28 +1572,20 @@ function getOrderedNotes(): NoteItem[] {
 }
 
 function findAssistantMessage(node: Node | null): HTMLElement | null {
-  const element = node instanceof HTMLElement
-    ? node
-    : node?.parentElement ?? null;
-  if (!element) return null;
-
-  const direct = element.closest<HTMLElement>("[data-message-author-role='assistant']");
-  if (direct) return direct;
-
-  return element.closest<HTMLElement>("article[data-message-author-role='assistant']");
+  return findAssistantMessageElement(node);
 }
 
 function ensureMessageId(message: HTMLElement): string {
   let id = message.getAttribute(MESSAGE_ID_ATTR);
   if (!id) {
-    id = message.getAttribute("data-message-id") ?? buildStableMessageId(message);
+    id = buildStableMessageId(message);
     message.setAttribute(MESSAGE_ID_ATTR, id);
   }
   return id;
 }
 
 function buildStableMessageId(message: HTMLElement): string {
-  const provided = message.getAttribute("data-message-id");
+  const provided = getAssistantMessageId(message);
   if (provided) return provided;
 
   const assistantMessages = getAssistantMessages();
@@ -1628,11 +1595,7 @@ function buildStableMessageId(message: HTMLElement): string {
 }
 
 function getAssistantMessages(): HTMLElement[] {
-  return Array.from(
-    document.querySelectorAll<HTMLElement>(
-      "[data-message-author-role='assistant'], article[data-message-author-role='assistant']",
-    ),
-  );
+  return getAssistantMessageElements();
 }
 
 function isInsideRoot(node: Node | null): boolean {
@@ -1908,15 +1871,8 @@ function findMessageForPersistedNote(note: PersistedNoteItem): HTMLElement | nul
 }
 
 function findAssistantMessageById(messageId: string): HTMLElement | null {
-  const escaped = escapeSelectorValue(messageId);
-
-  const direct = document.querySelector<HTMLElement>(`[data-message-id="${escaped}"]`) ??
-    document.querySelector<HTMLElement>(`[${MESSAGE_ID_ATTR}="${escaped}"]`);
-  if (direct) {
-    direct.setAttribute(MESSAGE_ID_ATTR, messageId);
-    return direct;
-  }
-
+  // Resolve IDs through recognized assistant bodies: the new ID attribute
+  // sits on an outer wrapper and also appears on user messages.
   for (const message of getAssistantMessages()) {
     if (ensureMessageId(message) === messageId) {
       return message;
@@ -2263,11 +2219,6 @@ function normalizePromptMatch(value: string): string {
 
 function stripWhitespace(value: string): string {
   return value.replace(/\s+/g, "");
-}
-
-function escapeSelectorValue(value: string): string {
-  const cssApi = CSS as typeof CSS & { escape?: (text: string) => string };
-  return cssApi.escape ? cssApi.escape(value) : value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"");
 }
 
 function hashText(value: string): string {

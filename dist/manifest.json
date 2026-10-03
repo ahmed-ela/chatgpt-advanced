@@ -2,18 +2,25 @@
   "manifest_version": 3,
   "name": "Plannotator ChatGPT Notes",
   "version": "0.0.1",
-  "description": "Highlight assistant responses on ChatGPT, add inline notes, and insert a revision prompt into the native composer.",
+  "description": "Highlight AI responses on ChatGPT, Claude, and Gemini, add inline notes, and queue follow-up messages in the native composer.",
   "content_scripts": [
     {
       "matches": [
         "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
         "http://127.0.0.1/*",
         "http://localhost/*"
       ],
       "js": [
-        "content.js"
+        "content.js",
+        "queue-ui.js"
       ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "queue-worker.js",
+    "type": "module"
+  }
 }
