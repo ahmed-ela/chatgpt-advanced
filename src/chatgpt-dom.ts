@@ -148,12 +148,28 @@ export function writeComposer(element: QueueComposer, text: string): boolean {
     range.selectNodeContents(element);
     selection.removeAllRanges();
     selection.addRange(range);
+    const inputType = text ? "insertText" : "deleteContentBackward";
+    const data = text || null;
+    const previousMarkup = element.innerHTML;
+    // Managed editors use beforeinput to reconcile the selected DOM range with
+    // their own state, including when their tab is unfocused. Give them the edit
+    // before a direct DOM fallback can replace the nodes they manage.
+    const beforeInput = new InputEvent("beforeinput", {
+      bubbles: true, composed: true, cancelable: true, data, inputType,
+    });
+    element.dispatchEvent(beforeInput);
+    const matches = normalizeText(readComposer(element)) === normalizeText(text);
+    // Cancellation can mean either a handled edit or rejection. Never insert a
+    // second time or overwrite a rejected edit. Also honor synchronous editors
+    // that commit the requested content without cancelling the event.
+    if (beforeInput.defaultPrevented || (element.innerHTML !== previousMarkup && matches)) return element.isConnected && matches;
+    if (!element.isConnected || element.getAttribute("contenteditable") !== "true" || element.getAttribute("aria-disabled") === "true") return false;
     let inserted = false;
     try { inserted = document.execCommand("insertText", false, text); } catch { /* Fallback for editors without execCommand. */ }
     if (!inserted) {
       element.textContent = text;
       element.dispatchEvent(new InputEvent("input", {
-        bubbles: true, composed: true, data: text, inputType: "insertText",
+        bubbles: true, composed: true, data, inputType,
       }));
     }
   }

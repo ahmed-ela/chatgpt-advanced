@@ -4,6 +4,15 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-04
+
+### Fixed
+
+- Continue sending queued follow-ups in open background tabs on ChatGPT, Claude, and Gemini, retaining completion, draft, pause, ownership, and uncertain-send checks.
+- Deliver controlled-editor changes through `beforeinput` before falling back to direct DOM edits, preserving editor cancellation and avoiding duplicate insertion.
+- Wake queue checks directly from completion events and yield native composer commits without background-throttled timers.
+- Reject expired send authorizations after a suspended tab resumes instead of clicking Send with stale ownership.
+
 ## [0.3.3] - 2026-10-04
 
 ### Changed

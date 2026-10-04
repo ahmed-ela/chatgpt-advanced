@@ -9,9 +9,9 @@ if (!build.success) throw new Error(build.logs.join("\n"));
 const source = (await build.outputs[0]!.text()).replace(/export\s*\{\s*MessageQueue\s*\};?\s*$/, "globalThis.__MessageQueue = MessageQueue;");
 type Provider = "claude" | "gemini";
 interface QueueView {
-  start(): void; stop(): void; tick(): Promise<void>;
+  start(): void; stop(): void; tick(immediate?: boolean): Promise<void>;
   state: QueueState | null; saving: boolean; polling: boolean; dispatching: boolean;
-  lastPoll: number;
+  lastPoll: number; tickPending: boolean; tickScheduled: boolean;
 }
 interface Tab {
   provider: Provider; key: string; dom: Window; doc: Document; queue: QueueView;
@@ -102,7 +102,7 @@ async function createTab(provider: Provider, initialize?: (tab: Tab) => void): P
   doc.write(provider === "claude"
     ? `<a aria-current="page" href="/chat/${chatId}">Selected chat</a><main></main><div data-cds="ChatComposer"><div class="ProseMirror" data-testid="chat-input" contenteditable="true" role="textbox"></div><button id="native" aria-label="Stop response">Stop</button></div>`
     : '<main></main><input-area-v2><rich-textarea><div class="ql-editor" contenteditable="true" role="textbox"></div></rich-textarea><button id="native" aria-label="Stop response">Stop</button></input-area-v2>');
-  Object.assign(dom, { Array, Boolean, String, Number, Set, Map, WeakMap, Math, Date, Object, JSON, RegExp, Error, Promise, URL, atob });
+  Object.assign(dom, { Array, Boolean, String, Number, Set, Map, WeakMap, Math, Date, Object, JSON, RegExp, Error, Promise, URL, atob, MessageChannel });
   Object.defineProperty(dom, "top", { value: {}, configurable: true });
   Object.defineProperty(doc, "visibilityState", { value: "visible", configurable: true });
   Object.defineProperties(dom.HTMLElement.prototype, {
@@ -193,14 +193,20 @@ async function enqueue(tab: Tab, text: string): Promise<string> {
   return added.id;
 }
 async function poll(tab: Tab): Promise<void> {
-  await waitFor(() => !tab.queue.polling && !tab.queue.dispatching && !tab.queue.saving, "idle before explicit poll");
+  await idle(tab, "idle before explicit poll");
   tab.queue.lastPoll = 0;
-  await tab.queue.tick();
+  await tab.queue.tick(true);
+  await idle(tab, "explicit poll and event-driven work finish");
 }
-async function dispatchReady(tab: Tab): Promise<void> {
-  await waitFor(() => !tab.queue.polling && !tab.queue.dispatching, "queue idle");
-  await poll(tab);
+async function idle(tab: Tab, label: string): Promise<void> {
+  // A DOM mutation can schedule a tick after the current callback returns.
+  // Awaiting a direct tick alone is insufficient if that other tick owns the
+  // runtime: direct tick then returns early while its durable work continues.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await waitFor(() => !tab.queue.polling && !tab.queue.dispatching && !tab.queue.saving &&
+    !tab.queue.tickPending && !tab.queue.tickScheduled, label);
 }
+async function dispatchReady(tab: Tab): Promise<void> { await poll(tab); }
 
 function wrapGeminiQuery(tab: Tab, query: HTMLElement, turnId: string, index: number): void {
   const turn = tab.doc.createElement("div");
@@ -218,6 +224,38 @@ function closeView(tab: Tab): void {
 
 describe("Claude and Gemini persistent queues", () => {
   for (const provider of ["claude", "gemini"] as const) {
+    test(`${provider}: a hidden tab drains successive replies without a visibility change or manual poll`, async () => {
+      const tab = await createTab(provider);
+      const first = await enqueue(tab, "First background follow-up");
+      const second = await enqueue(tab, "Second background follow-up");
+      Object.defineProperty(tab.doc, "visibilityState", { value: "hidden", configurable: true });
+      tab.doc.dispatchEvent(new tab.dom.Event("visibilitychange") as unknown as Event);
+      await idle(tab, "hidden tab observes the running response");
+      expect(tab.sent).toEqual([]);
+
+      finish(tab);
+      await waitFor(() => tab.sent.length === 1 && !tab.queue.dispatching, "first hidden completion acknowledged", 500);
+      expect(tab.doc.visibilityState).toBe("hidden");
+      expect(tab.sent).toEqual(["First background follow-up"]);
+      expect((await saved(tab)).items.find(item => item.id === first)?.status).toBe("waiting");
+      expect((await saved(tab)).items.find(item => item.id === second)?.status).toBe("queued");
+      expect(tab.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+      expect(tab.shadow.querySelector(`li[data-id='${second}']`)).not.toBeNull();
+
+      finish(tab);
+      await waitFor(() => tab.sent.length === 2 && !tab.queue.dispatching, "second hidden completion acknowledged", 500);
+      expect(tab.doc.visibilityState).toBe("hidden");
+      expect(tab.sent).toEqual(["First background follow-up", "Second background follow-up"]);
+      expect((await saved(tab)).items.find(item => item.id === second)?.status).toBe("waiting");
+      expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(0);
+
+      finish(tab);
+      await waitFor(() => tab.queue.state?.items.length === 0, "hidden queue fully drained", 500);
+      expect((await saved(tab)).items).toHaveLength(0);
+      expect(tab.sent).toHaveLength(2);
+      expect(tab.stops).toBe(0);
+    });
+
     test(`${provider}: native composer editing retains the slot and updates a reopened tab`, async () => {
       const tab = await createTab(provider);
       const first = await enqueue(tab, "First queued");

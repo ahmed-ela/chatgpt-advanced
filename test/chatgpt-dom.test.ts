@@ -115,6 +115,93 @@ describe("queue DOM adapter", () => {
     expect(writeComposer(composer, "")).toBe(true);
   });
 
+  test.each(["cancelled", "not cancelled"] as const)("a hidden controlled editor commits beforeinput once (%s)", handling => {
+    const composer = findQueueComposer()!;
+    composer.innerHTML = "<p>Existing draft</p>";
+    const paragraph = composer.firstElementChild!;
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    const text = "Queued <literal>\n    Keep indentation";
+    let editorState = "Existing draft";
+    let edits = 0;
+    let nativeEdits = 0;
+    let fallbackInputs = 0;
+    let observedEvent: InputEvent | undefined;
+    let observedRange: Range | undefined;
+    Object.defineProperty(document, "execCommand", { value: () => { nativeEdits++; return false; }, configurable: true });
+    composer.addEventListener("input", () => { fallbackInputs++; });
+    composer.addEventListener("beforeinput", raw => {
+      const event = raw as InputEvent;
+      observedEvent = event;
+      observedRange = dom.getSelection()!.getRangeAt(0).cloneRange() as unknown as Range;
+      // A controlled editor updates its model and renders its managed nodes.
+      // The adapter must not replace those nodes or replay this same edit.
+      if (handling === "cancelled") event.preventDefault();
+      editorState = event.data!;
+      paragraph.textContent = editorState;
+      edits++;
+    });
+    expect(writeComposer(composer, text)).toBe(true);
+    expect(observedRange?.startContainer).toBe(composer);
+    expect(observedRange?.startOffset).toBe(0);
+    expect(observedRange?.endContainer).toBe(composer);
+    expect(observedRange?.endOffset).toBe(1);
+    expect(observedEvent?.bubbles && observedEvent.composed && observedEvent.cancelable).toBe(true);
+    expect(observedEvent?.inputType).toBe("insertText");
+    expect(observedEvent?.data).toBe(text);
+    expect(editorState).toBe(text);
+    expect(readComposer(composer)).toBe(text);
+    expect(composer.firstElementChild).toBe(paragraph);
+    expect(composer.querySelector("literal")).toBeNull();
+    expect(edits).toBe(1);
+    expect(nativeEdits).toBe(0);
+    expect(fallbackInputs).toBe(0);
+  });
+
+  test("a controlled editor can reject replacement without losing its original draft", () => {
+    const composer = findQueueComposer()!;
+    composer.innerHTML = "<p>Keep the original draft</p>";
+    const paragraph = composer.firstElementChild;
+    let nativeEdits = 0;
+    let fallbackInputs = 0;
+    Object.defineProperty(document, "execCommand", { value: () => { nativeEdits++; return false; }, configurable: true });
+    composer.addEventListener("beforeinput", event => { event.preventDefault(); });
+    composer.addEventListener("input", () => { fallbackInputs++; });
+    expect(writeComposer(composer, "Rejected replacement")).toBe(false);
+    expect(readComposer(composer)).toBe("Keep the original draft");
+    expect(composer.firstElementChild).toBe(paragraph);
+    expect(nativeEdits).toBe(0);
+    expect(fallbackInputs).toBe(0);
+  });
+
+  test("a controlled editor receives selected deletion and preserves its empty managed paragraph", () => {
+    const composer = findQueueComposer()!;
+    composer.innerHTML = "<p>Saved to the queue</p>";
+    const paragraph = composer.firstElementChild!;
+    let editorState = "Saved to the queue";
+    let nativeEdits = 0;
+    let observedEvent: InputEvent | undefined;
+    let selectedText = "";
+    Object.defineProperty(document, "execCommand", { value: () => { nativeEdits++; return false; }, configurable: true });
+    composer.addEventListener("beforeinput", raw => {
+      const event = raw as InputEvent;
+      observedEvent = event;
+      selectedText = dom.getSelection()!.toString();
+      event.preventDefault();
+      editorState = "";
+      paragraph.replaceChildren(document.createElement("br"));
+    });
+    expect(writeComposer(composer, "")).toBe(true);
+    expect(observedEvent?.inputType).toBe("deleteContentBackward");
+    // HappyDOM normalizes the native event's null deletion data to "".
+    expect(observedEvent?.data || null).toBeNull();
+    expect(selectedText).toBe("Saved to the queue");
+    expect(editorState).toBe("");
+    expect(readComposer(composer).trim()).toBe("");
+    expect(composer.firstElementChild).toBe(paragraph);
+    expect(paragraph.firstElementChild?.tagName).toBe("BR");
+    expect(nativeEdits).toBe(0);
+  });
+
   test("recognizes attachment previews/removal controls but not upload picker", () => {
     const scope = document.querySelector("[data-composer-body]")!;
     scope.insertAdjacentHTML("beforeend", '<button aria-label="Add photos and files">+</button><input type="file">');

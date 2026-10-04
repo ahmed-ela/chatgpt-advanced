@@ -23,6 +23,10 @@ Local artifacts are under `.local/release/firefox/0.3.1/` and `.local/amo/0.3.1/
 
 The [public privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf) was updated again for 0.3.2 from `PRIVACY.md` and read back byte for byte on 2026-10-04. Source, both packaged candidates, and the public copy include the GitHub update-host disclosure, browser-profile storage, lack of cross-browser synchronization, and Firefox's provider-submission data permissions. The old source archive cannot substitute for the changed 0.3.2 package.
 
+## Background queue candidate 0.3.4
+
+The current source includes the background-tab queue fix and isolated Chrome, Chrome beta, and Firefox 0.3.4 packages. This does not change the signed 0.3.2 feed, publish the signed 0.3.3 candidate, or update any Web Store submission. Firefox 0.3.4 still requires signing and live Firefox verification. See [BACKGROUND_QUEUE_VERIFICATION.md](BACKGROUND_QUEUE_VERIFICATION.md).
+
 ## Approved, hosted, and installed 0.3.2
 
 - Unsigned submission package: `.local/release/firefox/0.3.2/threadlane-firefox-0.3.2.zip`.
@@ -39,7 +43,7 @@ The [public privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4
 
 ## Signed 0.3.3 awaiting real update verification
 
-- This version qualifies delivery through the signed Firefox update channel; runtime behavior and permissions are unchanged from 0.3.2. Tracked `package.json` and `CHANGELOG.md` match the isolated candidate, and the version check passes. The public Chrome `dist/` remains 0.2.5.
+- This version qualifies delivery through the signed Firefox update channel; runtime behavior and permissions are unchanged from 0.3.2. At signing, `package.json` and `CHANGELOG.md` matched the isolated candidate. Current development has advanced to 0.3.4; the immutable 0.3.3 candidate remains separate. The public Chrome `dist/` remains 0.2.5.
 - Mozilla version record `6541692`, file `5085832`: **Approved**. The signed XPI was downloaded, but is not yet normally installed or published as a feed release.
 - Signed XPI: 68,616 bytes, SHA-256 `af0e20c4df3aa4994c5e1778fec2c3058cd029b24cf2acf8aa292b1e6243fa10`.
 - Reviewer source: `.local/update-qualification/0.3.3/threadlane-firefox-0.3.3-source.zip`, SHA-256 `3dbd4b84a3070c9f7a14556fed5abe291f0ca011d1e939564c73c0a2c4f79a6f`. A fresh extraction, frozen dependency install, and build with Bun 1.3.5 reproduced all ten production files. Relative to 0.3.2, only the output manifest version changes.

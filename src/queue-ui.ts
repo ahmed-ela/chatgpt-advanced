@@ -38,7 +38,7 @@ export class MessageQueue {
   private nativeReplay = new NativeReplayGuard();
   private polling = false;
   private tickPending = false;
-  private tickTimer = 0;
+  private tickScheduled = false;
   private observer: MutationObserver | null = null;
   private domWaiters = new Set<() => void>();
   // Gemini prompt indices can be reused after a reload. Only this document's
@@ -221,7 +221,7 @@ export class MessageQueue {
 
   stop(): void {
     this.nativeReplay.finish();
-    clearInterval(this.pollTimer); clearTimeout(this.tickTimer); this.observer?.disconnect(); this.abort.abort();
+    clearInterval(this.pollTimer); this.observer?.disconnect(); this.abort.abort();
     for (const wake of this.domWaiters) wake();
     this.host.remove();
   }
@@ -238,11 +238,31 @@ export class MessageQueue {
   private scheduleTick(): void {
     if (this.abort.signal.aborted) return;
     this.tickPending = true;
-    if (this.tickTimer || this.polling || this.dispatching || this.saving || this.editingBusy) return;
-    this.tickTimer = window.setTimeout(() => {
-      this.tickTimer = 0; this.tickPending = false;
+    if (this.tickScheduled || this.polling || this.dispatching || this.saving || this.editingBusy) return;
+    this.tickScheduled = true;
+    // Completion and storage events already tell us when to check. Do not put
+    // that work behind a timer that browsers throttle in background tabs.
+    queueMicrotask(() => {
+      this.tickScheduled = false; this.tickPending = false;
       void this.tick(true);
-    }, 0);
+    });
+  }
+
+  private yieldComposerCommit(): Promise<void> {
+    if (this.abort.signal.aborted) return Promise.resolve();
+    // Let the native editor finish its input task without a throttled timer or
+    // animation frame. Close both ports on completion or extension shutdown.
+    return new Promise(resolve => {
+      const channel = new MessageChannel();
+      const done = () => {
+        channel.port1.close(); channel.port2.close();
+        this.abort.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      channel.port1.onmessage = done;
+      this.abort.signal.addEventListener("abort", done, { once: true });
+      channel.port2.postMessage(null);
+    });
   }
 
   private clearDrag(): void {
@@ -422,7 +442,7 @@ export class MessageQueue {
     return Boolean(this.state && this.state.items.length && !this.state.paused &&
       Date.now() >= this.retryAfter &&
       !this.state.items.some(item => item.status !== "queued") &&
-      document.visibilityState === "visible" && !this.editing && !this.saving && !this.dragId && !this.pointerDrag &&
+      !this.editing && !this.saving && !this.dragId && !this.pointerDrag &&
       composer && !readComposer(composer).trim() && !hasComposerAttachments() &&
       !isChatBusy() && this.transcriptReady());
   }
@@ -450,7 +470,7 @@ export class MessageQueue {
       if (readComposer(composer).trim() || hasComposerAttachments()) {
         this.error = SEND_DRAFT_WARNING; this.render(); return;
       }
-      if (!isCurrentConversationReady() || document.visibilityState !== "visible") {
+      if (!isCurrentConversationReady()) {
         this.error = "Wait for this conversation to finish loading before using Send now."; this.render(); return;
       }
     }
@@ -468,7 +488,7 @@ export class MessageQueue {
       this.error = ""; this.render();
       composer = findQueueComposer();
       if (key !== this.syncRoute() || !composer || !isCurrentConversationReady() ||
-          readComposer(composer).trim() || hasComposerAttachments() || document.visibilityState !== "visible") {
+          readComposer(composer).trim() || hasComposerAttachments()) {
         await this.request("release", { id: item.id }, key); return;
       }
       if (sendNow && isChatBusy()) {
@@ -488,14 +508,14 @@ export class MessageQueue {
       const ready = () => sendNow ? isCurrentConversationReady() : this.transcriptReady();
       composer = findQueueComposer();
       if (key !== this.syncRoute() || !composer || readComposer(composer).trim() || isChatBusy() ||
-          !ready() || document.visibilityState !== "visible" || hasComposerAttachments()) {
+          !ready() || hasComposerAttachments()) {
         await this.request("release", { id: item.id }, key); return;
       }
       const before = new Set(getVisibleUserMessages().map(message => message.id));
       if (!writeComposer(composer, item.text)) throw new Error("Could not fill the composer. The message remains saved.");
       // Yield for the native composer commit, then wait only while Send is not
       // ready instead of adding a fixed delay to every queued message.
-      await new Promise(resolve => window.setTimeout(resolve, 0));
+      await this.yieldComposerCommit();
       const composerDeadline = Date.now() + 1000;
       while (!findQueueSendButton() && Date.now() < composerDeadline && key === this.syncRoute() &&
           !this.abort.signal.aborted && !isChatBusy() && composer.isConnected && normalize(readComposer(composer)) === normalize(item.text)) {
@@ -503,25 +523,31 @@ export class MessageQueue {
       }
       if (this.abort.signal.aborted || key !== this.syncRoute() || isChatBusy() || !composer.isConnected ||
           normalize(readComposer(composer)) !== normalize(item.text) || hasComposerAttachments() ||
-          !findQueueSendButton() || !ready() || document.visibilityState !== "visible") {
+          !findQueueSendButton() || !ready()) {
         throw new Error("The conversation changed before sending. The message remains saved.");
       }
       await this.request("attempt", { id: item.id }, key);
       attempted = true;
+      // A suspended document can receive an old IPC reply after another tab
+      // changed the queue. Refresh ownership and pause state before acting.
+      await this.request("read", {}, key);
       this.render();
       const send = findQueueSendButton();
+      const committed = this.state?.items.find(entry => entry.id === item!.id);
+      const deadline = (committed?.attemptedAt ?? 0) + SEND_CONFIRM_MS;
       if (this.abort.signal.aborted || !send || key !== this.syncRoute() || isChatBusy() || !composer.isConnected ||
-          normalize(readComposer(composer)) !== normalize(item.text) || hasComposerAttachments() || !ready()) {
+          normalize(readComposer(composer)) !== normalize(item.text) || hasComposerAttachments() || !ready() ||
+          committed?.status !== "sending" || committed.owner !== item.owner ||
+          (!sendNow && this.state?.paused) || Date.now() >= deadline) {
         throw new Error("Send was interrupted. Check the conversation before retrying.");
       }
       clicked = true;
-      const deadline = Date.now() + SEND_CONFIRM_MS;
       const rawDraft = readComposer(composer);
       const expectedComposer = composer;
       const expectedItem = item;
       this.nativeReplay.begin({ composer, button: send, form: send.form, expiresAt: deadline,
         isCurrent: () => this.dispatching && !this.abort.signal.aborted &&
-          key === this.key && key === getQueueKey(location.href) && document.visibilityState === "visible" &&
+          key === this.key && key === getQueueKey(location.href) &&
           this.state?.items.some(entry => entry.id === expectedItem.id && entry.status === "sending" && entry.owner === expectedItem.owner) === true &&
           (sendNow || !this.state?.paused) && findQueueComposer() === expectedComposer && findQueueSendButton() === send &&
           readComposer(expectedComposer) === rawDraft && !isChatBusy() && !hasComposerAttachments() && ready(),

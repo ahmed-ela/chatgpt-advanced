@@ -68,7 +68,7 @@ async function waitFor(predicate: () => boolean, message = "condition", timeout 
   }
 }
 
-async function createTab(options: { newChat?: boolean; idle?: boolean; before?: Tab["before"]; returnBeforeRead?: boolean } = {}): Promise<Tab> {
+async function createTab(options: { newChat?: boolean; idle?: boolean; visibility?: DocumentVisibilityState; before?: Tab["before"]; returnBeforeRead?: boolean } = {}): Promise<Tab> {
   const dom = new Window({ url: options.newChat ? "https://chatgpt.com/" : "https://chatgpt.com/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
   const doc = dom.document as unknown as Document;
   doc.write(fixture);
@@ -78,9 +78,9 @@ async function createTab(options: { newChat?: boolean; idle?: boolean; before?: 
     doc.querySelector("#native-action")!.setAttribute("aria-label", "Send message");
   }
   if (options.idle) doc.querySelector("#native-action")!.setAttribute("aria-label", "Send message");
-  Object.assign(dom, { Array, Boolean, String, Number, Set, Map, WeakMap, Math, Date, Object, JSON, RegExp, Error, Promise, URL, atob });
+  Object.assign(dom, { Array, Boolean, String, Number, Set, Map, WeakMap, Math, Date, Object, JSON, RegExp, Error, Promise, URL, atob, MessageChannel });
   Object.defineProperty(dom, "top", { value: {}, configurable: true });
-  Object.defineProperty(doc, "visibilityState", { value: "visible", configurable: true });
+  Object.defineProperty(doc, "visibilityState", { value: options.visibility ?? "visible", configurable: true });
   Object.defineProperties(dom.HTMLElement.prototype, {
     getClientRects: { value: () => [new dom.DOMRect(100, 650, 700, 100)], configurable: true },
     getBoundingClientRect: { value: () => new dom.DOMRect(100, 650, 700, 100), configurable: true },
@@ -126,6 +126,10 @@ function enter(tab: Tab, options: { shiftKey?: boolean; isComposing?: boolean } 
 function busy(tab: Tab, value: boolean): void {
   tab.action.setAttribute("aria-label", value ? "Stop streaming" : "Send message");
   tab.action.textContent = value ? "Stop" : "Send";
+}
+function visibility(tab: Tab, state: DocumentVisibilityState): void {
+  Object.defineProperty(tab.doc, "visibilityState", { value: state, configurable: true });
+  tab.doc.dispatchEvent(new tab.dom.Event("visibilitychange") as unknown as Event);
 }
 function button(tab: Tab, action: string, id?: string): HTMLButtonElement {
   const selector = `${id ? `li[data-id='${id}'] ` : ""}button[data-action='${action}']`;
@@ -267,6 +271,45 @@ describe("Persistent message queue UI", () => {
     expect(native.sent).toEqual(["Follow up through the asynchronous model gate"]);
     expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
     expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+  });
+
+  test.each(["click", "submit"] as const)("hiding a tab during a delayed native %s replay preserves exactly one send", async mode => {
+    const tab = await createTab();
+    const form = wrapComposerInForm(tab);
+    const text = "Finish the owned send after switching tabs";
+    const id = await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    const sent: string[] = [];
+    const acknowledge = () => {
+      sent.push(tab.composer.innerText);
+      postUserBubble(tab, text);
+      draft(tab, "");
+      busy(tab, true);
+    };
+    if (mode === "click") tab.action.addEventListener("click", acknowledge);
+    else form.addEventListener("submit", acknowledge);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial send intercepted before hiding");
+    visibility(tab, "hidden");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    const replay = () => {
+      if (mode === "click") gate.replay();
+      else {
+        const event = new tab.dom.SubmitEvent("submit", { bubbles: true, cancelable: true });
+        Object.defineProperties(event, { isTrusted: { value: true }, submitter: { value: tab.action } });
+        form.dispatchEvent(event as unknown as SubmitEvent);
+      }
+    };
+    replay();
+    replay();
+    await waitFor(() => !tab.queue.dispatching, "hidden native replay acknowledged");
+    visibility(tab, "visible");
+    replay();
+    await poll(tab);
+    expect(sent).toEqual([text]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "waiting"]]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
     expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
   });
 
@@ -1136,6 +1179,114 @@ describe("Persistent message queue UI", () => {
     expect(right.shadow.querySelectorAll("li")).toHaveLength(1);
   });
 
+  test("visible and hidden tabs racing for the same queued item send it exactly once", async () => {
+    const visible = await createTab();
+    const hidden = await createTab({ visibility: "hidden" });
+    const id = await enqueue(visible, "Only one tab may send this shared item");
+    await waitFor(() => hidden.queue.state?.items.some(item => item.id === id) === true, "hidden tab receives shared item");
+    const visibleNative = simulateNativeChat(visible);
+    const hiddenNative = simulateNativeChat(hidden);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const contenders = new Set<Tab>();
+    for (const tab of [visible, hidden]) tab.before = async request => {
+      if (request.action === "claim") { contenders.add(tab); await gate; }
+    };
+    busy(visible, false);
+    busy(hidden, false);
+    await waitFor(() => contenders.size === 2, "both visible and hidden tabs attempt the same claim");
+    release();
+    await waitFor(() => visibleNative.sent.length + hiddenNative.sent.length === 1 &&
+      !visible.queue.dispatching && !hidden.queue.dispatching, "single shared dispatch acknowledged");
+    await poll(visible);
+    await poll(hidden);
+    expect([...visibleNative.sent, ...hiddenNative.sent]).toEqual(["Only one tab may send this shared item"]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "waiting"]]);
+    expect([...visible.requests, ...hidden.requests].filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+  });
+
+  test("switching to another tab while an owned claim returns preserves one send", async () => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Keep the claimed item when its tab becomes hidden");
+    const native = simulateNativeChat(tab);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let claimed = false;
+    tab.after = async request => {
+      if (request.action === "claim") { claimed = true; await gate; }
+    };
+    busy(tab, false);
+    await waitFor(() => claimed, "durable claim before its response");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("claimed");
+    visibility(tab, "hidden");
+    release();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "owned send acknowledged while hidden");
+    visibility(tab, "visible");
+    await poll(tab);
+    expect(native.sent).toEqual(["Keep the claimed item when its tab becomes hidden"]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "waiting"]]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "release")).toHaveLength(0);
+  });
+
+  test.each(["expired", "paused"] as const)("a hidden tab does not click after its delayed attempt response becomes %s", async change => {
+    const tab = await createTab({ visibility: "hidden" });
+    const text = "Preserve the saved item when send authorization changes";
+    const id = await enqueue(tab, text);
+    const native = simulateNativeChat(tab);
+    const clock = { now: Date.now() };
+    Object.assign(tab.dom, { Date: class extends Date { static override now() { return clock.now; } } });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempted = false;
+    tab.after = async request => {
+      if (request.action === "attempt") { attempted = true; await gate; }
+    };
+    busy(tab, false);
+    await waitFor(() => attempted, "durable attempt before its response");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    if (change === "expired") clock.now += 30_001;
+    else {
+      button(tab, "pause").click();
+      await waitFor(() => tab.queue.state?.paused === true, "pause persisted while attempt response is pending");
+    }
+    release();
+    await waitFor(() => !tab.queue.dispatching, "changed attempt preserved for review");
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerText).toBe("");
+    const saved = await persisted();
+    expect(saved.items.map(item => [item.id, item.status])).toEqual([[id, "review"]]);
+    expect(saved.items[0]?.text).toBe(text);
+    if (change === "paused") expect(saved.paused).toBe(true);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+  });
+
+  test.each(["draft", "pause", "busy"] as const)("a hidden tab still respects its %s guard and sends after it clears", async guard => {
+    const tab = await createTab({ visibility: "hidden" });
+    const id = await enqueue(tab, "Send only after the protected state clears");
+    const native = simulateNativeChat(tab);
+    if (guard === "draft") draft(tab, "Unsent text must survive");
+    if (guard === "pause") {
+      button(tab, "pause").click();
+      await waitFor(() => tab.queue.state?.paused === true, "hidden queue paused");
+    }
+    if (guard !== "busy") busy(tab, false);
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+    if (guard === "draft") {
+      expect(tab.composer.innerText).toBe("Unsent text must survive");
+      draft(tab, "");
+    } else if (guard === "pause") button(tab, "pause").click();
+    else busy(tab, false);
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "hidden dispatch after its guard clears");
+    expect(native.sent).toEqual(["Send only after the protected state clears"]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    expect(tab.doc.visibilityState).toBe("hidden");
+  });
+
   test("automatic dispatch waits when the composer contains an unsent draft", async () => {
     const tab = await createTab();
     await enqueue(tab, "Saved queued text");
@@ -1354,8 +1505,8 @@ describe("Persistent message queue UI", () => {
     expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
   });
 
-  test("completion mutations dispatch each next message promptly despite a fresh busy heartbeat", async () => {
-    const tab = await createTab();
+  test.each(["visible", "hidden"] as const)("completion mutations in a %s tab dispatch each next message despite a fresh busy heartbeat", async state => {
+    const tab = await createTab({ visibility: state });
     const initialAnswer = tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!;
     initialAnswer.querySelector(".turn-action-controls")!.remove();
     const native = simulateNativeChat(tab);
