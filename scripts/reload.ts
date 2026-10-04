@@ -64,7 +64,7 @@ async function reload(): Promise<void> {
   console.log(`[browser-extension] built ${built}`);
   console.log(`[browser-extension] watcher logs: ${logPath}`);
   console.log("[browser-extension] the watcher remains running and rebuilds future source edits automatically.");
-  console.log("[browser-extension] one-time setup: Reload Plannotator ChatGPT Notes in chrome://extensions, then refresh ChatGPT to activate the dev reload hook.");
+  console.log("[browser-extension] one-time setup: Reload Threadlane in chrome://extensions, then refresh ChatGPT to activate the dev reload hook.");
 }
 
 async function readVersion(): Promise<string | null> {
@@ -81,7 +81,7 @@ async function readVersion(): Promise<string | null> {
   }
   if (!response.ok) throw new Error(`A service at ${devOrigin} returned HTTP ${response.status}; refusing to start a second watcher.`);
   try { return parseVersion(await response.json()); }
-  catch { throw new Error(`The service at ${devOrigin} is not a Plannotator dev watcher.`); }
+  catch { throw new Error(`The service at ${devOrigin} is not a Threadlane dev watcher.`); }
 }
 
 function parseVersion(value: unknown): string {

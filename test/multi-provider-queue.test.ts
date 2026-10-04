@@ -18,8 +18,10 @@ interface Tab {
   composer: HTMLElement; action: HTMLButtonElement; shadow: ShadowRoot;
   sent: string[]; stops: number; turnIndex: number; pending: HTMLElement;
   deferGeminiResponse?: boolean;
+  suppressNativeEcho?: boolean;
   pendingGeminiUser?: HTMLElement;
   pendingGeminiIndex?: number;
+  failNextRequest?: { action: QueueRequest["action"]; message: string };
   listener?: (message: { type: string; key: string }) => void;
 }
 const chatId = "e284b3373d6e5bc6";
@@ -74,7 +76,7 @@ function appendTurn(tab: Tab, text: string, complete: boolean): void {
     answer.innerHTML = `<div data-testid="assistant-message" data-is-streaming="${!complete}"><div data-perf-reply-text><p>Response ${index}</p></div></div>${complete ? `<div data-testid="message-actions">${toolbar}</div>` : ""}`;
     main.append(user, answer); tab.pending = answer;
   } else {
-    const turn = tab.doc.createElement("div"); turn.className = "conversation-container"; turn.id = `turn-${index}`;
+    const turn = tab.doc.createElement("div"); turn.className = "conversation-container"; turn.id = index.toString(16).padStart(16, "0");
     turn.innerHTML = `<user-query><div class="query-content" id="user-query-content-${index}"><div class="query-text"><p></p></div></div></user-query><model-response><message-content><div class="markdown" aria-busy="${!complete}"><p>Response ${index}</p></div></message-content><span jslog="173913;BardVeMetadataKey:${metadata};mutable:true"></span>${complete ? `<div class="response-footer complete"></div><message-actions>${toolbar}</message-actions>` : ""}</model-response>`;
     renderGeminiPrompt(turn.querySelector("user-query")!, text);
     main.append(turn); tab.pending = turn.querySelector("model-response")!;
@@ -93,7 +95,7 @@ function finish(tab: Tab): void {
   tab.action.setAttribute("aria-label", "Send message");
 }
 
-async function createTab(provider: Provider): Promise<Tab> {
+async function createTab(provider: Provider, initialize?: (tab: Tab) => void): Promise<Tab> {
   const url = provider === "claude" ? `https://claude.ai/chat/${chatId}` : `https://gemini.google.com/app/${chatId}`;
   const dom = new Window({ url });
   const doc = dom.document as unknown as Document;
@@ -111,6 +113,7 @@ async function createTab(provider: Provider): Promise<Tab> {
   tab.composer = doc.querySelector<HTMLElement>(provider === "claude" ? "[data-testid='chat-input']" : ".ql-editor")!;
   tab.action = doc.querySelector<HTMLButtonElement>("#native")!;
   appendTurn(tab, "Repeated prompt", false);
+  initialize?.(tab);
   runInContext(source, dom);
   const Constructor = (dom as unknown as { __MessageQueue: new (runtime: unknown) => QueueView }).__MessageQueue;
   tab.queue = new Constructor({
@@ -118,6 +121,11 @@ async function createTab(provider: Provider): Promise<Tab> {
     async sendMessage(raw: unknown) {
       const request = raw as QueueRequest;
       if (request.key !== tab.key) throw new Error("Wrong conversation key");
+      if (tab.failNextRequest?.action === request.action) {
+        const message = tab.failNextRequest.message;
+        delete tab.failNextRequest;
+        throw new Error(message);
+      }
       const result = await store.apply(request, `tab${tabs.indexOf(tab)}:${request.clientId}`, now);
       if (result.changed && !(request.action === "heartbeat" && request.busy === true) && request.action !== "edit-heartbeat") queueMicrotask(() => {
         for (const other of tabs) if (other.key === request.key) other.listener?.({ type: "plannotator:queue:changed", key: request.key });
@@ -132,7 +140,9 @@ async function createTab(provider: Provider): Promise<Tab> {
     // innerText collapses its newlines, unlike the editor's submitted value.
     const text = tab.composer.textContent ?? "";
     tab.sent.push(text);
-    if (tab.provider === "gemini" && tab.deferGeminiResponse) {
+    if (tab.suppressNativeEcho) {
+      // A native request can start before the provider renders its user echo.
+    } else if (tab.provider === "gemini" && tab.deferGeminiResponse) {
       const query = tab.doc.createElement("user-query");
       tab.pendingGeminiIndex = tab.turnIndex++;
       query.innerHTML = '<div class="query-content" id="user-query-content-undefined"><div class="query-text"><p></p></div></div>';
@@ -190,6 +200,20 @@ async function poll(tab: Tab): Promise<void> {
 async function dispatchReady(tab: Tab): Promise<void> {
   await waitFor(() => !tab.queue.polling && !tab.queue.dispatching, "queue idle");
   await poll(tab);
+}
+
+function wrapGeminiQuery(tab: Tab, query: HTMLElement, turnId: string, index: number): void {
+  const turn = tab.doc.createElement("div");
+  turn.className = "conversation-container"; turn.id = turnId;
+  query.querySelector(".query-content")!.id = `user-query-content-${index}`;
+  query.replaceWith(turn); turn.append(query);
+  turn.insertAdjacentHTML("beforeend", `<model-response><message-content><div class="markdown" aria-busy="true"><p>Response starts</p></div></message-content><span jslog="173913;BardVeMetadataKey:${metadata};mutable:true"></span></model-response>`);
+  tab.pending = turn.querySelector("model-response")!;
+}
+
+function closeView(tab: Tab): void {
+  tab.queue.stop();
+  Object.defineProperty(tab.doc, "visibilityState", { value: "hidden", configurable: true });
 }
 
 describe("Claude and Gemini persistent queues", () => {
@@ -412,5 +436,207 @@ describe("Claude and Gemini persistent queues", () => {
     await poll(tab);
     expect((await saved(tab)).items).toHaveLength(0);
     expect(tab.sent).toHaveLength(1);
+  });
+
+  test("Gemini resumes a paused queue after reopened prompt indices change from 11 to 9", async () => {
+    const turnId = "23845300d6e6d28e";
+    const tab = await createTab("gemini", tab => {
+      tab.doc.querySelector(".conversation-container")!.id = turnId;
+      tab.doc.querySelector(".query-content")!.id = "user-query-content-11";
+      renderGeminiPrompt(tab.doc.querySelector("user-query")!, "Write 30 short numbered tips for starting a small herb garden.");
+      tab.turnIndex = 12;
+    });
+    const queued = await enqueue(tab, "Reply with one short tip about rosemary.");
+    control(tab, "pause").click();
+    await waitFor(() => Boolean(tab.queue.state?.paused), "pause before closing");
+    finish(tab);
+    await poll(tab);
+    expect((await saved(tab)).lastCompletedUserMessageId).toBe(`gemini:user:${turnId}`);
+    const transcript = tab.doc.querySelector("main")!.innerHTML;
+    closeView(tab); now += 4000;
+    const reopened = await createTab("gemini", view => {
+      view.doc.querySelector("main")!.innerHTML = transcript;
+      view.doc.querySelector(".query-content")!.id = "user-query-content-9";
+      view.pending = view.doc.querySelector("model-response")!;
+      view.turnIndex = 10;
+      view.action.setAttribute("aria-label", "Send message");
+    });
+    expect((await saved(reopened)).items.map(item => item.id)).toEqual([queued]);
+    expect(reopened.queue.state?.paused).toBe(true);
+    expect(reopened.sent).toEqual([]);
+    control(reopened, "pause").click();
+    await waitFor(() => reopened.sent.length === 1 && !reopened.queue.dispatching, "automatic send after reopened Resume");
+    expect(reopened.sent).toEqual(["Reply with one short tip about rosemary."]);
+    expect((await saved(reopened)).items.find(item => item.id === queued)?.status).toBe("waiting");
+    finish(reopened);
+    await waitFor(() => reopened.queue.state?.items.length === 0, "reopened queue drains once");
+    expect(reopened.sent).toHaveLength(1);
+    expect(tab.sent).toEqual([]);
+  });
+
+  test("Gemini persists a stable completion anchor after an optimistic acknowledgement before reopening", async () => {
+    const tab = await createTab("gemini", tab => {
+      tab.doc.querySelector(".query-content")!.id = "user-query-content-10";
+      tab.turnIndex = 11;
+    });
+    const first = await enqueue(tab, "Repeated prompt");
+    const second = await enqueue(tab, "Send this after reopening");
+    tab.deferGeminiResponse = true;
+    finish(tab); now += 4000;
+    await dispatchReady(tab);
+    const optimistic = (await saved(tab)).items.find(item => item.id === first)!;
+    expect(optimistic.status).toBe("waiting");
+    expect(optimistic.userMessageId).toContain("gemini:user:user-query-content-11:");
+    control(tab, "pause").click();
+    await waitFor(() => Boolean(tab.queue.state?.paused), "pause after optimistic acknowledgement");
+    wrapGeminiQuery(tab, tab.pendingGeminiUser!, "1234567890abcdef", 11);
+    await poll(tab);
+    expect((await saved(tab)).items.find(item => item.id === first)?.userMessageId).toBe("gemini:user:1234567890abcdef");
+    expect((await saved(tab)).items.find(item => item.id === first)?.status).toBe("waiting");
+    finish(tab);
+    await poll(tab);
+    expect((await saved(tab)).items.map(item => item.id)).toEqual([second]);
+    expect((await saved(tab)).lastCompletedUserMessageId).toBe("gemini:user:1234567890abcdef");
+    const transcript = tab.doc.querySelector("main")!.innerHTML;
+    closeView(tab); now += 4000;
+    const reopened = await createTab("gemini", view => {
+      view.doc.querySelector("main")!.innerHTML = transcript;
+      Array.from(view.doc.querySelectorAll(".query-content")).forEach((query, index) => { query.id = `user-query-content-${index + 8}`; });
+      view.pending = Array.from(view.doc.querySelectorAll<HTMLElement>("model-response")).at(-1)!;
+      view.turnIndex = 10;
+      view.action.setAttribute("aria-label", "Send message");
+    });
+    control(reopened, "pause").click();
+    await waitFor(() => reopened.sent.length === 1 && !reopened.queue.dispatching, "next item sends after stable anchor survives reopen");
+    expect(reopened.sent).toEqual(["Send this after reopening"]);
+    expect(tab.sent).toEqual(["Repeated prompt"]);
+    expect((await saved(reopened)).items.find(item => item.id === second)?.status).toBe("waiting");
+  });
+
+  test("Gemini does not acknowledge an older equal-text optimistic prompt when its stable wrapper appears", async () => {
+    const key = getQueueKey(`https://gemini.google.com/app/${chatId}`)!;
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "enqueue", clientId: "seed", id: "pending-repeat", text: "Repeated prompt" }, "seed", now);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "pause", clientId: "seed", paused: true }, "seed", now);
+    let olderQuery!: HTMLElement;
+    const tab = await createTab("gemini", view => {
+      finish(view);
+      olderQuery = view.doc.createElement("user-query");
+      olderQuery.innerHTML = '<div class="query-content" id="user-query-content-undefined"><div class="query-text"></div></div>';
+      renderGeminiPrompt(olderQuery, "Repeated prompt");
+      view.doc.querySelector("main")!.append(olderQuery);
+      view.suppressNativeEcho = true;
+    });
+    control(tab, "pause").click();
+    await waitFor(() => tab.sent.length === 1, "native send starts before new echo");
+    wrapGeminiQuery(tab, olderQuery, "1111222233334444", 1);
+    // Force processing of the changed older DOM while the new echo is absent.
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect((await saved(tab)).items.find(item => item.id === "pending-repeat")?.status).toBe("sending");
+    expect(tab.queue.dispatching).toBe(true);
+    expect(tab.shadow.querySelector("li[data-id='pending-repeat']")).not.toBeNull();
+    tab.turnIndex = 2;
+    appendTurn(tab, "Repeated prompt", false);
+    await waitFor(() => !tab.queue.dispatching, "new equal-text echo acknowledged");
+    expect((await saved(tab)).items.find(item => item.id === "pending-repeat")?.userMessageId).toBe("gemini:user:0000000000000002");
+    expect(tab.sent).toEqual(["Repeated prompt"]);
+  });
+
+  test("Gemini never rebinds a legacy shifted index by text and keeps explicit recovery available", async () => {
+    const key = getQueueKey(`https://gemini.google.com/app/${chatId}`)!;
+    const legacy = "gemini:user:user-query-content-11:18g9iba";
+    const recoveryNotice = "This older queue needs confirmation after reopening. Use Send now on the first message to continue.";
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "enqueue", clientId: "seed", id: "legacy-followup", text: "Saved before the update", afterUserMessageId: legacy }, "seed", now);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "pause", clientId: "seed", paused: true }, "seed", now);
+    const tab = await createTab("gemini", view => {
+      view.doc.querySelector(".conversation-container")!.id = "23845300d6e6d28e";
+      view.doc.querySelector(".query-content")!.id = "user-query-content-9";
+      renderGeminiPrompt(view.doc.querySelector("user-query")!, "Write 30 short numbered tips for starting a small herb garden.");
+      view.turnIndex = 10;
+      finish(view);
+    });
+    expect(tab.sent).toEqual([]);
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    control(tab, "pause").click();
+    await waitFor(() => tab.queue.state?.paused === false, "resume legacy queue");
+    await poll(tab);
+    expect(tab.sent).toEqual([]);
+    expect((await saved(tab)).lastCompletedUserMessageId).toBe(legacy);
+    expect((await saved(tab)).items.find(item => item.id === "legacy-followup")?.status).toBe("queued");
+    expect(tab.shadow.textContent).toContain(recoveryNotice);
+
+    tab.action.setAttribute("aria-label", "Stop response");
+    await poll(tab);
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    finish(tab);
+    await poll(tab);
+    expect(tab.shadow.textContent).toContain(recoveryNotice);
+
+    const identity = tab.doc.querySelector("[jslog]")!;
+    const observedMetadata = identity.getAttribute("jslog")!;
+    identity.removeAttribute("jslog");
+    await poll(tab);
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    identity.setAttribute("jslog", observedMetadata);
+    await poll(tab);
+    expect(tab.shadow.textContent).toContain(recoveryNotice);
+
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "enqueue", clientId: "peer", id: "peer-edit", text: "Another tab is editing this" }, "peer", now);
+    const editToken = crypto.randomUUID();
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "begin-edit", clientId: "peer", id: "peer-edit", editToken }, "peer", now);
+    await poll(tab);
+    expect(control(tab, "steer", "legacy-followup").disabled).toBe(true);
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "cancel-edit", clientId: "peer", id: "peer-edit", editToken }, "peer", now);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "remove", clientId: "peer", id: "peer-edit" }, "peer", now);
+    await poll(tab);
+    expect(tab.shadow.textContent).toContain(recoveryNotice);
+
+    draft(tab, "Keep this unrelated draft");
+    control(tab, "steer", "legacy-followup").click();
+    await waitFor(() => Boolean(tab.shadow.textContent?.includes("Queue or clear the current draft")), "draft protection warning");
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    expect(tab.composer.textContent).toBe("Keep this unrelated draft");
+    draft(tab, "");
+    await waitFor(() => Boolean(tab.shadow.textContent?.includes(recoveryNotice)), "recovery notice after draft warning clears");
+
+    tab.failNextRequest = { action: "heartbeat", message: "Queue connection unavailable" };
+    await poll(tab);
+    expect(tab.shadow.textContent).toContain("Queue connection unavailable");
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    control(tab, "check").click();
+    await waitFor(() => Boolean(tab.shadow.textContent?.includes(recoveryNotice)), "recovery notice after successful connection retry");
+    control(tab, "steer", "legacy-followup").click();
+    await waitFor(() => tab.sent.length === 1 && !tab.queue.dispatching, "explicit legacy recovery");
+    expect(tab.sent).toEqual(["Saved before the update"]);
+    expect(tab.shadow.textContent).not.toContain(recoveryNotice);
+    finish(tab);
+    await waitFor(() => tab.queue.state?.items.length === 0, "explicit recovery completes once");
+    expect(tab.sent).toHaveLength(1);
+  });
+
+  test("Gemini cannot bind a reopened legacy anchor to a different equal-text turn reusing its index", async () => {
+    const key = getQueueKey(`https://gemini.google.com/app/${chatId}`)!;
+    const legacy = "gemini:user:user-query-content-11:18g9iba";
+    const repeated = "Write 30 short numbered tips for starting a small herb garden.";
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "enqueue", clientId: "seed", id: "legacy-duplicate", text: "Wait for my original turn", afterUserMessageId: legacy }, "seed", now);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, action: "pause", clientId: "seed", paused: true }, "seed", now);
+    const tab = await createTab("gemini", view => {
+      view.doc.querySelector(".conversation-container")!.id = "23845300d6e6d28e";
+      view.doc.querySelector(".query-content")!.id = "user-query-content-9";
+      renderGeminiPrompt(view.doc.querySelector("user-query")!, repeated);
+      // The original turn was interrupted. A later equal-text turn is complete
+      // and now reuses the original ephemeral index after history remounting.
+      view.pending.querySelector(".markdown")!.setAttribute("aria-busy", "false");
+      view.turnIndex = 11;
+      appendTurn(view, repeated, true);
+      view.action.setAttribute("aria-label", "Send message");
+    });
+    expect((await saved(tab)).lastCompletedUserMessageId).toBe(legacy);
+    control(tab, "pause").click();
+    await waitFor(() => tab.queue.state?.paused === false, "resume ambiguous legacy queue");
+    await poll(tab);
+    expect(tab.sent).toEqual([]);
+    expect((await saved(tab)).items.find(item => item.id === "legacy-duplicate")?.status).toBe("queued");
+    expect((await saved(tab)).lastCompletedUserMessageId).toBe(legacy);
   });
 });

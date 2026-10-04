@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "plannotator-chatgpt-notes",
+      "dependencies": {
+        "lucide": "1.51.0",
+      },
       "devDependencies": {
         "@types/bun": "latest",
         "fake-indexeddb": "^6.2.5",
@@ -117,6 +120,8 @@
     "is-fullwidth-code-point": ["is-fullwidth-code-point@3.0.0", "", {}, "sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg=="],
 
     "lru-cache": ["lru-cache@7.18.3", "", {}, "sha512-jumlc0BIUrS3qJGgIkWZsyfAM7NCWiBcCDhnd+3NNM5KbBmLTgHVfWBcg6W+rLUsIpzpERPsvwUP7CckAQSOoA=="],
+
+    "lucide": ["lucide@1.51.0", "", {}, "sha512-7K2Zm6Haz2EhYOAAE1ZQfsfs83ywGodSCvwr7YvCBzB9oelqDsRvMFUBDbXEGUaUMAisC7xcjMmSrozzYL/UwQ=="],
 
     "mitt": ["mitt@3.0.1", "", {}, "sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw=="],
 

@@ -1,4 +1,6 @@
-/** Persistent per-conversation queue. Every change is serialized by one IndexedDB transaction. */
+import { EncryptedRecordStore } from "./encrypted-storage";
+
+/** Persistent per-conversation queue. Changes use strictly durable encrypted compare-and-swap commits. */
 export const QUEUE_MESSAGE_TYPE = "plannotator:queue";
 export const QUEUE_CHANGED_TYPE = "plannotator:queue:changed";
 export const QUEUE_CLAIM_MS = 10_000;
@@ -32,7 +34,7 @@ export interface QueueState {
   /** Required completed-reply anchor; may start with the currently generating turn. */
   lastCompletedUserMessageId?: string;
 }
-export type QueueAction = "read" | "enqueue" | "begin-edit" | "edit-heartbeat" | "cancel-edit" | "steer" | "edit" | "move" | "remove" | "pause" | "heartbeat" | "claim" | "attempt" | "ack" | "complete" | "release" | "review" | "retry";
+export type QueueAction = "read" | "enqueue" | "begin-edit" | "edit-heartbeat" | "cancel-edit" | "steer" | "edit" | "move" | "remove" | "pause" | "heartbeat" | "claim" | "attempt" | "ack" | "anchor" | "complete" | "release" | "review" | "retry";
 export interface QueueRequest {
   type: typeof QUEUE_MESSAGE_TYPE;
   key: string;
@@ -82,73 +84,38 @@ export function getQueueKey(url: string): string | null {
 }
 
 export class QueueStore {
-  private connection?: Promise<IDBDatabase>;
-  constructor(private readonly factory: IDBFactory = indexedDB, private readonly name = "plannotator-message-queue-v1") {}
-
-  private database(): Promise<IDBDatabase> {
-    if (!this.connection) {
-      this.connection = new Promise((resolve, reject) => {
-        const request = this.factory.open(this.name, 1);
-        request.onupgradeneeded = () => request.result.createObjectStore("queues", { keyPath: "key" });
-        request.onerror = () => { this.connection = undefined; reject(request.error ?? new Error("Could not open queue storage")); };
-        request.onblocked = () => { this.connection = undefined; reject(new Error("Queue storage is busy; close older extension pages and retry")); };
-        request.onsuccess = () => {
-          const database = request.result;
-          database.onversionchange = () => { database.close(); this.connection = undefined; };
-          resolve(database);
-        };
-      });
-    }
-    return this.connection;
+  private readonly storage: EncryptedRecordStore<StoredQueue>;
+  constructor(factory: IDBFactory = indexedDB, name = "plannotator-message-queue-v1") {
+    this.storage = new EncryptedRecordStore(factory, name, "queues");
   }
 
-  async close(): Promise<void> {
-    if (this.connection) (await this.connection).close();
-    this.connection = undefined;
-  }
+  close(): Promise<void> { return this.storage.close(); }
 
   async apply(request: QueueRequest, owner: string, now = Date.now()): Promise<QueueResult> {
     validateRequest(request);
     if (!owner || owner.length > 256) throw new Error("Invalid queue client");
-    const database = await this.database();
-    return new Promise((resolve, reject) => {
-      // Strict durability asks Chrome to flush committed changes before acknowledging a send.
-      const tx = database.transaction("queues", "readwrite", { durability: "strict" });
-      const table = tx.objectStore("queues");
-      const read = table.get(request.key);
-      let result: QueueResult | undefined;
-      let failure: unknown;
-      read.onsuccess = () => {
-        try {
-          const state: StoredQueue = read.result ?? { key: request.key, revision: 0, paused: false, items: [], busyLeases: [] };
-          const before = JSON.stringify(state);
-          recover(state, now);
-          const claimed = mutate(state, request, owner, now);
-          const changed = JSON.stringify(state) !== before;
-          if (changed) {
-            state.revision += 1;
-            table.put(state);
-          }
-          // Receipts and per-tab busy ownership stay private to the worker.
-          const { retiredIds: _retiredIds, editReceipts: _editReceipts,
-            busyLeases: _busyLeases, legacyBusyUntil: _legacyBusyUntil, ...visible } = state;
-          result = { state: structuredClone(visible), changed, ...(claimed ? { claimed: structuredClone(claimed) } : {}) };
-        } catch (error) {
-          failure = error;
-          tx.abort();
-        }
-      };
-      tx.oncomplete = () => result ? resolve(result) : reject(new Error("Queue storage returned no result"));
-      tx.onabort = () => reject(failure ?? tx.error ?? new Error("Queue storage transaction failed"));
-      tx.onerror = () => { failure ??= tx.error; };
-    });
+    return this.storage.apply(request.key,
+      () => ({ key: request.key, revision: 0, paused: false, items: [], busyLeases: [] }),
+      state => {
+        const before = JSON.stringify(state);
+        recover(state, now);
+        const claimed = mutate(state, request, owner, now);
+        const changed = JSON.stringify(state) !== before;
+        if (changed) state.revision += 1;
+        // Receipts and per-tab busy ownership stay private to the worker.
+        const { retiredIds: _retiredIds, editReceipts: _editReceipts,
+          busyLeases: _busyLeases, legacyBusyUntil: _legacyBusyUntil, ...visible } = state;
+        const result: QueueResult = { state: structuredClone(visible), changed,
+          ...(claimed ? { claimed: structuredClone(claimed) } : {}) };
+        return { value: state, result, changed };
+      });
   }
 }
 
 function validateRequest(request: QueueRequest): void {
   if (!request || request.type !== QUEUE_MESSAGE_TYPE || typeof request.key !== "string" || request.key.length > 2_048 || !/^(chatgpt|claude|gemini|fixture):/.test(request.key)) throw new Error("Invalid queue conversation");
   if (typeof request.clientId !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.clientId)) throw new Error("Invalid queue client");
-  if (!["read", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "complete", "release", "review", "retry"].includes(request.action)) throw new Error("Unknown queue action");
+  if (!["read", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "anchor", "complete", "release", "review", "retry"].includes(request.action)) throw new Error("Unknown queue action");
   if (request.id !== undefined && (typeof request.id !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.id))) throw new Error("Invalid queued message ID");
   if (request.editToken !== undefined && (typeof request.editToken !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.editToken))) throw new Error("Invalid queue edit token");
   if (["begin-edit", "edit-heartbeat", "cancel-edit"].includes(request.action) && !request.editToken) throw new Error("Missing queue edit token");
@@ -349,6 +316,20 @@ function mutate(state: StoredQueue, request: QueueRequest, owner: string, now: n
       current.userMessageId = request.userMessageId;
       delete current.leaseUntil;
       delete current.reason;
+      return;
+    }
+    case "anchor": {
+      // Only the exact indexed Gemini identity may be promoted to the server
+      // turn observed around that same user bubble. A racing/newer anchor wins.
+      if (!request.key.startsWith("gemini:") ||
+          typeof request.userMessageId !== "string" ||
+          !/^gemini:user:user-query-content-\d+:[a-z0-9]+$/.test(request.userMessageId ?? "") ||
+          !/^gemini:user:[0-9a-f]{16}$/i.test(request.afterUserMessageId ?? "")) throw new Error("Invalid Gemini transcript anchor promotion");
+      if (request.id) {
+        if (item?.status === "waiting" && item.userMessageId === request.userMessageId) item.userMessageId = request.afterUserMessageId;
+      } else if (state.lastCompletedUserMessageId === request.userMessageId) {
+        state.lastCompletedUserMessageId = request.afterUserMessageId;
+      }
       return;
     }
     case "complete": {

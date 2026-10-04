@@ -1,14 +1,50 @@
 import { getQueueKey, QUEUE_CHANGED_TYPE, QUEUE_MESSAGE_TYPE, QueueStore, type QueueRequest, type QueueResponse } from "./queue-store";
+import { ANNOTATION_CHANGED_TYPE, ANNOTATION_MESSAGE_TYPE, AnnotationStore, getAnnotationKey, type AnnotationRequest, type AnnotationResponse } from "./annotation-store";
 
 declare const __PLANNOTATOR_DEV__: boolean;
 interface QueueSender { tab?: { id?: number; url?: string }; url?: string; frameId?: number }
-interface QueueChrome {
+export interface QueueChrome {
   runtime?: {
-    onMessage: { addListener(listener: (message: unknown, sender: QueueSender, respond: (response: QueueResponse) => void) => boolean | void): void };
+    onMessage: { addListener(listener: (message: unknown, sender: QueueSender, respond: (response: QueueResponse | AnnotationResponse) => void) => boolean | void): void };
   };
-  tabs?: { sendMessage(tabId: number, message: unknown): Promise<unknown> };
+  tabs?: { sendMessage(tabId: number, message: unknown, options?: { frameId: number }): Promise<unknown> };
 }
 const chromeApi = (globalThis as typeof globalThis & { chrome?: QueueChrome }).chrome;
+
+/** Register separately so protocol validation and durable responses can be tested. */
+export function registerAnnotationWorker(api: QueueChrome, annotationStore = new AnnotationStore()): void {
+  const annotationTabs = new Map<number, string>();
+  api.runtime?.onMessage.addListener((message, sender, respond) => {
+    if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== ANNOTATION_MESSAGE_TYPE) return;
+    const request = message as AnnotationRequest;
+    const tabId = sender.tab?.id;
+    const tabUrl = sender.tab?.url ?? sender.url ?? "";
+    const tabKey = getAnnotationKey(tabUrl);
+    let sameOrigin = false;
+    try { sameOrigin = new URL(sender.url ?? "").origin === new URL(tabUrl).origin; } catch { /* Reject malformed sender URLs. */ }
+    if (!Number.isInteger(tabId) || tabId! < 0 || sender.frameId !== 0 || !sameOrigin || !tabKey || request.key !== tabKey) {
+      respond({ ok: false, error: "Annotation conversation does not match the current top-level tab" });
+      return false;
+    }
+    annotationTabs.set(tabId!, tabKey);
+    void annotationStore.apply(request).then(result => {
+      respond({ ok: true, notes: result.notes, revision: result.revision });
+      if (result.changed) {
+        for (const [knownTab, knownKey] of annotationTabs) {
+          if (knownKey !== request.key) continue;
+          void api.tabs?.sendMessage(knownTab, {
+            type: ANNOTATION_CHANGED_TYPE, key: request.key, revision: result.revision,
+          }, { frameId: 0 }).catch(() => { annotationTabs.delete(knownTab); });
+        }
+      }
+    }).catch((error: unknown) => {
+      respond({ ok: false, error: error instanceof Error ? error.message : "Annotations could not be saved. Keep this tab open and retry." });
+    });
+    return true;
+  });
+}
+
+if (chromeApi?.runtime) {
 const store = new QueueStore();
 const seenTabs = new Map<number, string>();
 
@@ -39,6 +75,8 @@ chromeApi?.runtime?.onMessage.addListener((message, sender, respond) => {
   });
   return true;
 });
+registerAnnotationWorker(chromeApi);
+}
 
 // Keep development auto-reload and the durable queue in one MV3 worker.
-if (__PLANNOTATOR_DEV__) void import("./dev-worker");
+if (typeof __PLANNOTATOR_DEV__ !== "undefined" && __PLANNOTATOR_DEV__) void import("./dev-worker");

@@ -3,9 +3,21 @@ import { Window } from "happy-dom";
 import { runInContext } from "node:vm";
 
 const fixture = await Bun.file(new URL("./current-layout.html", import.meta.url)).text();
+const testSource = process.env.PLANNOTATOR_TEST_SOURCE ?? new URL("../src/content.ts", import.meta.url).pathname;
+const helperExpression = `({ getSelectionDraft, findAssistantMessage, getAssistantMessages,
+  ensureMessageId, findAssistantMessageById, restorePersistedNote,
+  findComposer, isNativeComposerSendKey, isNativeSendButton,
+  getComposerText, setComposerText, getConversationStorageKey,
+  readPersistedConversationState, getProviderName, bootstrap,
+  getDraftText: () => state.draftText, getOrderedNotes })`;
 const build = await Bun.build({
-  entrypoints: [process.env.PLANNOTATOR_TEST_SOURCE ?? new URL("../src/content.ts", import.meta.url).pathname],
+  entrypoints: [testSource],
   target: "browser", format: "esm",
+  plugins: [{ name: "expose-content-helpers", setup(build) {
+    build.onLoad({ filter: /content\.ts$/ }, async args => args.path === testSource
+      ? { contents: `${await Bun.file(args.path).text()}\nglobalThis.__contentHelpers = ${helperExpression};`, loader: "ts" }
+      : undefined);
+  } }],
 });
 if (!build.success) throw new Error(build.logs.join("\n"));
 const compiled = await build.outputs[0]!.text();
@@ -81,12 +93,7 @@ beforeEach(() => {
     const __PLANNOTATOR_BUILD_ID__ = "test";
     const __PLANNOTATOR_DEV_ORIGIN__ = "";
     ${compiled}
-    ({ getSelectionDraft, findAssistantMessage, getAssistantMessages,
-       ensureMessageId, findAssistantMessageById, restorePersistedNote,
-       findComposer, isNativeComposerSendKey, isNativeSendButton,
-       getComposerText, setComposerText, getConversationStorageKey,
-       readPersistedConversationState, getProviderName, bootstrap,
-       getDraftText: () => state.draftText, getOrderedNotes });
+    globalThis.__contentHelpers;
   `, dom) as ContentHelpers;
 });
 
@@ -380,7 +387,7 @@ for (const fixture of providerFixtures) {
       expect(helpers.getComposerText(nativeComposer)).toBe(originalComposerText);
     });
 
-    test("commits the actual note value after non-composed input and Enter", async () => {
+    test.each(["pointer", "keyboard"])("commits the actual note value and inserts it using %s controls", async (activation) => {
       helpers.bootstrap();
       selectText(document.querySelector(fixture.assistant)!, "reflects sunlight");
       document.dispatchEvent(new dom.Event("selectionchange") as unknown as Event);
@@ -390,7 +397,7 @@ for (const fixture of providerFixtures) {
       const addNote = shadow.querySelector<HTMLButtonElement>("[data-action='open-draft']")!;
       expect(addNote).not.toBeNull();
       // The UI opens on pointerdown to preserve the selected response range.
-      addNote.dispatchEvent(new dom.PointerEvent("pointerdown", { bubbles: true, composed: true, cancelable: true }) as unknown as Event);
+      if (activation === "pointer") addNote.dispatchEvent(new dom.PointerEvent("pointerdown", { bubbles: true, composed: true, cancelable: true }) as unknown as Event);
       addNote.click();
       const field = shadow.querySelector<HTMLTextAreaElement>("textarea[data-field='draft']")!;
       expect(field).not.toBeNull();
@@ -405,6 +412,14 @@ for (const fixture of providerFixtures) {
       expect(helpers.getOrderedNotes()[0]?.quote).toBe("reflects sunlight");
       expect(shadow.querySelector(`[aria-label='Insert notes into ${fixture.provider}']`)).not.toBeNull();
       expect(helpers.getComposerText(helpers.findComposer()!).trim()).toBe("");
+      const insert = shadow.querySelector<HTMLButtonElement>("[data-action='insert-notes']")!;
+      if (activation === "pointer") insert.dispatchEvent(new dom.PointerEvent("pointerdown", { bubbles: true, composed: true, cancelable: true }) as unknown as Event);
+      insert.click();
+      const insertedDeadline = Date.now() + 1500;
+      while (!helpers.getComposerText(helpers.findComposer()!).includes("Explain how the moon affects tides.") && Date.now() < insertedDeadline) await Bun.sleep(10);
+      expect(helpers.getComposerText(helpers.findComposer()!)).toContain("Explain how the moon affects tides.");
+      expect(helpers.getComposerText(helpers.findComposer()!)).toContain("reflects sunlight");
+      expect(helpers.getOrderedNotes()).toHaveLength(1);
     });
   });
 }

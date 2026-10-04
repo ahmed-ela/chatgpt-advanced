@@ -1,8 +1,9 @@
 import { QUEUE_MESSAGE_TYPE, getQueueKey, type QueueItem, type QueueState } from "./queue-store";
+import { icon } from "./icons";
 import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages,
-  getAssistantCompletionAfter, isCurrentConversationReady,
+  getAssistantCompletionAfter, getStableUserMessageAnchor, isCurrentConversationReady,
   registerNewConversationAlias, clearConversationAlias, composerScope, getProviderName,
 } from "./chatgpt-dom";
 
@@ -17,8 +18,7 @@ const SEND_DRAFT_WARNING = "Queue or clear the current draft before using Send n
 const EDIT_DRAFT_WARNING = "Queue or clear the current draft before editing a queued message.";
 const normalize = (text: string) => text.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trim();
 const escapeHtml = (text: string) => text.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
-const icon = (name: "edit" | "trash" | "send") => `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${name === "edit" ? '<path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m14 5 5 5"/>' : name === "trash" ? '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>' : '<path d="M12 20V4m-7 7 7-7 7 7"/>'}</svg>`;
-const grip = '<svg class="grip" width="14" height="18" viewBox="0 0 14 18" fill="currentColor" aria-hidden="true"><circle cx="4" cy="4" r="1.3"/><circle cx="10" cy="4" r="1.3"/><circle cx="4" cy="9" r="1.3"/><circle cx="10" cy="9" r="1.3"/><circle cx="4" cy="14" r="1.3"/><circle cx="10" cy="14" r="1.3"/></svg>';
+const grip = icon("grip", 18, "grip");
 
 /** Each tab is a view. Only the background's transactional claim grants sending. */
 export class MessageQueue {
@@ -40,6 +40,9 @@ export class MessageQueue {
   private tickTimer = 0;
   private observer: MutationObserver | null = null;
   private domWaiters = new Set<() => void>();
+  // Gemini prompt indices can be reused after a reload. Only this document's
+  // own enqueue/ACK observation can authorize a temporary indexed anchor.
+  private temporaryAnchors = new Set<string>();
   private signature = "";
   private dragId: string | null = null;
   private pointerDrag: { id: string; pointerId: number; x: number; y: number; handle: HTMLElement; toId?: string } | null = null;
@@ -66,10 +69,12 @@ export class MessageQueue {
       section{pointer-events:auto;background:light-dark(#fafafa,#232323);border:1px solid light-dark(#dedede,#444);border-radius:16px;box-shadow:0 4px 18px #00000010;overflow:hidden}
       header{display:flex;align-items:center;gap:8px;padding:7px 9px;min-height:42px}.title{font-weight:600;flex:1;text-align:left}.count{font-size:11px;opacity:.65;margin-left:4px}.add{background:light-dark(#222,#eee);color:light-dark(#fff,#222);font-weight:600}.add:hover{opacity:.85;background:light-dark(#222,#eee)}
       ol{padding:0;margin:0;list-style:none;max-height:240px;overflow:auto}li{position:relative;padding:9px 12px;border-top:1px solid light-dark(#e5e5e5,#3c3c3c);display:flex;gap:9px;align-items:flex-start}.order-slot{position:relative;flex:0 0 18px;width:18px;height:24px;padding:0;border-radius:4px;display:grid;place-items:center}.num{opacity:.45;font-size:11px;transition:opacity 140ms ease}.drag-handle{cursor:grab;user-select:none}.drag-handle:hover{background:transparent}.grip{position:absolute;opacity:0;transition:opacity 140ms ease;pointer-events:none}.drag-handle:active{cursor:grabbing}li:hover .drag-handle .num,.drag-handle:focus-visible .num,li.dragging .num{opacity:0}li:hover .grip,.drag-handle:focus-visible .grip,li.dragging .grip{opacity:.65}li.dragging .body{opacity:.5}li.drop-before{box-shadow:inset 0 2px #458cff}li.drop-after{box-shadow:inset 0 -2px #458cff}.body{flex:1;min-width:0}.text{white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.status{font-size:11px;opacity:.7;margin-top:3px}.tools{display:flex;align-items:center;gap:1px}.tools button{padding:3px 6px}textarea{display:block;width:100%;min-height:70px;resize:vertical;border:1px solid light-dark(#bbb,#555);border-radius:8px;background:light-dark(white,#181818);color:inherit;padding:8px}.edit-tools{margin-top:6px;display:flex;gap:6px}
-      .hint{padding:4px 12px 8px;font-size:11px;opacity:.65}.error{padding:8px 12px;color:light-dark(#9b3025,#ffb3a9);border-top:1px solid light-dark(#e5e5e5,#444)}.review{color:light-dark(#9b3025,#ffb3a9)}
+      .error{padding:8px 12px;color:light-dark(#9b3025,#ffb3a9);border-top:1px solid light-dark(#e5e5e5,#444)}.review{color:light-dark(#9b3025,#ffb3a9)}
       @media(max-height:650px){ol{max-height:150px}}
       .drag-handle{touch-action:none}
-      @media(prefers-reduced-motion:reduce){.num,.grip{transition:none}}
+      .icon{display:block;flex:none;pointer-events:none}button{display:inline-flex;align-items:center;justify-content:center;gap:5px}.title{justify-content:flex-start}.count{margin-left:0}.tools button{width:28px;height:28px;padding:5px}.icon-loader{animation:queue-icon-spin 800ms linear infinite}
+      @keyframes queue-icon-spin{to{transform:rotate(360deg)}}
+      @media(prefers-reduced-motion:reduce){.num,.grip{transition:none}.icon-loader{animation:none}}
     </style>`;
     this.panel.setAttribute("aria-label", "Message queue");
     this.shadow.append(this.panel);
@@ -249,6 +254,7 @@ export class MessageQueue {
         this.firstSend.key = key;
       } else this.firstSend = null;
       this.key = key; this.state = null; this.editing = null; this.editToken = null; this.error = "";
+      this.temporaryAnchors.clear();
       this.editRevision++; this.retryAfter = 0;
       this.pendingSave = null; this.signature = "";
     }
@@ -305,8 +311,24 @@ export class MessageQueue {
           if (editRevision !== this.editRevision || this.editingBusy) return;
         }
       }
-      for (const item of this.state?.items ?? []) {
-        if (item.status === "waiting" && item.userMessageId && !busy && getAssistantCompletionAfter(item.userMessageId)) {
+      const previousAnchor = this.state?.lastCompletedUserMessageId;
+      const stableAnchor = previousAnchor && this.canUseAnchor(previousAnchor) && getStableUserMessageAnchor(previousAnchor);
+      if (stableAnchor && stableAnchor !== previousAnchor) {
+        await this.request("anchor", { userMessageId: previousAnchor, afterUserMessageId: stableAnchor }, key);
+        if (key !== this.syncRoute() || editRevision !== this.editRevision || this.editingBusy) return;
+      }
+      for (let item of this.state?.items ?? []) {
+        if (item.status === "waiting" && item.userMessageId && this.canUseAnchor(item.userMessageId)) {
+          const stable = getStableUserMessageAnchor(item.userMessageId);
+          if (stable && stable !== item.userMessageId) {
+            const result = await this.request("anchor", { id: item.id, userMessageId: item.userMessageId, afterUserMessageId: stable }, key);
+            if (key !== this.syncRoute() || editRevision !== this.editRevision || this.editingBusy) return;
+            const updated = result.state.items.find(entry => entry.id === item.id);
+            if (!updated) continue;
+            item = updated;
+          }
+        }
+        if (item.status === "waiting" && item.userMessageId && this.canUseAnchor(item.userMessageId) && !busy && getAssistantCompletionAfter(item.userMessageId)) {
           await this.request("complete", { id: item.id, userMessageId: item.userMessageId }, key);
         }
       }
@@ -362,7 +384,14 @@ export class MessageQueue {
     this.render();
     try {
       const pending = this.pendingSave;
-      await this.request("enqueue", { id: pending.id, text, afterUserMessageId: getVisibleUserMessages().at(-1)?.id }, key);
+      const wasEmpty = this.state?.items.length === 0;
+      const previous = getVisibleUserMessages().at(-1)?.id;
+      const afterUserMessageId = previous && (getStableUserMessageAnchor(previous) ?? previous);
+      const result = await this.request("enqueue", { id: pending.id, text, afterUserMessageId }, key);
+      // Do not let adding to an older queue grant a witness to its unknown
+      // indexed anchor merely because a different repeated prompt reused it.
+      if (key === this.syncRoute() && wasEmpty && afterUserMessageId && result.state.items[0]?.id === pending.id &&
+          result.state.lastCompletedUserMessageId === afterUserMessageId) this.temporaryAnchors.add(afterUserMessageId);
       if (key === this.syncRoute() && composer.isConnected && readComposer(composer) === text) {
         if (!writeComposer(composer, "")) this.error = "Saved to queue. Clear the composer to continue.";
         else this.pendingSave = null;
@@ -386,8 +415,12 @@ export class MessageQueue {
 
   private transcriptReady(): boolean {
     return this.state?.lastCompletedUserMessageId
-      ? getAssistantCompletionAfter(this.state.lastCompletedUserMessageId)
+      ? this.canUseAnchor(this.state.lastCompletedUserMessageId) && getAssistantCompletionAfter(this.state.lastCompletedUserMessageId)
       : isCurrentConversationReady();
+  }
+
+  private canUseAnchor(userId: string): boolean {
+    return !userId.startsWith("gemini:user:user-query-content-") || this.temporaryAnchors.has(userId);
   }
 
   private async dispatch(sendNowId?: string): Promise<void> {
@@ -472,8 +505,9 @@ export class MessageQueue {
       while (!this.abort.signal.aborted && Date.now() < deadline && key === this.syncRoute()) {
         const posted = getVisibleUserMessages().find(message => !before.has(message.id) && normalize(message.text) === normalize(item!.text));
         if (posted) {
-          postedUserMessageId = posted.id;
-          await this.request("ack", { id: item.id, userMessageId: posted.id }, key);
+          this.temporaryAnchors.add(posted.id);
+          postedUserMessageId = getStableUserMessageAnchor(posted.id) ?? posted.id;
+          await this.request("ack", { id: item.id, userMessageId: postedUserMessageId }, key);
           this.error = ""; return;
         }
         await this.waitForDomChange(300);
@@ -495,7 +529,9 @@ export class MessageQueue {
           if (attempted && postedUserMessageId) {
             try {
               const result = await this.request("read", {}, key);
-              if (!result.state.items.some(entry => entry.id === item!.id) && result.state.lastCompletedUserMessageId === postedUserMessageId) {
+              if (!result.state.items.some(entry => entry.id === item!.id) &&
+                  (result.state.lastCompletedUserMessageId === postedUserMessageId ||
+                    result.state.lastCompletedUserMessageId === getStableUserMessageAnchor(postedUserMessageId))) {
                 this.error = ""; return;
               }
             } catch { /* No durable confirmation: keep the error visible. */ }
@@ -650,6 +686,12 @@ export class MessageQueue {
     if (composer && !draft && !hasComposerAttachments() && [SEND_DRAFT_WARNING, EDIT_DRAFT_WARNING].includes(this.error)) this.error = "";
     const busy = isChatBusy();
     const showAdd = Boolean(draft && (busy || allItems.length || this.state?.paused));
+    const unknownAnchor = Boolean(this.state?.lastCompletedUserMessageId && !this.canUseAnchor(this.state.lastCompletedUserMessageId)) ||
+      allItems.some(item => item.status === "waiting" && item.userMessageId && !this.canUseAnchor(item.userMessageId));
+    const recovery = !this.error && !this.state?.paused && !busy && !this.dispatching && !this.saving && !this.editing &&
+      !draft && getQueueKey(location.href) === this.key && items.some(item => item.status === "queued") &&
+      allItems.every(item => item.status === "queued" || item.status === "waiting") && unknownAnchor && isCurrentConversationReady()
+      ? "This older queue needs confirmation after reopening. Use Send now on the first message to continue." : "";
     if (!this.key || !composer || (!items.length && !showAdd && !this.error && !this.state?.paused)) {
       this.host.style.display = "none";
       this.panel.replaceChildren(); this.signature = "";
@@ -657,19 +699,17 @@ export class MessageQueue {
     }
     if (!this.host.isConnected) document.body.append(this.host);
     this.host.style.display = "block";
-    const status = this.editing ? `Editing message ${items.findIndex(item => item.id === this.editing) + 1} in composer · Send saves its place` : this.state?.paused ? "Paused" : items.some(item => item.status === "editing") ? "Waiting for an edit" : items.some(item => item.status === "review") ? "Needs review" :
-      allItems.some(item => item.status === "sending") ? "Confirming send" : allItems.some(item => item.status === "claimed") ? "Preparing message" :
-      busy || allItems.some(item => item.status === "waiting") ? "Waiting for response" : draft && items.length ? "Waiting for composer" : "Saved across tabs";
-    const signature = JSON.stringify([items, this.state?.paused, status, showAdd, this.saving, this.editingBusy, this.dispatching, this.expanded, this.editing, this.error]);
+    const signature = JSON.stringify([items, this.state?.paused, showAdd, this.saving, this.editingBusy, this.dispatching, this.expanded, this.editing, this.error, recovery]);
     if (signature !== this.signature && !this.dragId && !this.pointerDrag) {
       this.signature = signature;
       this.panel.innerHTML = `<header>
-        <button class="title" data-action="expand" aria-label="${this.expanded ? "Collapse" : "Expand"} message queue" aria-expanded="${this.expanded}">${items.length ? `Queue <span class="count">${items.length}</span>` : "Queue next message"}</button>
-        ${items.length || this.state?.paused ? `<button data-action="pause" aria-label="${this.state?.paused ? "Resume" : "Pause"} queue">${this.state?.paused ? "Resume" : "Pause"}</button>` : ""}
-        ${showAdd ? `<button class="add" data-action="enqueue" ${this.saving || this.editingBusy ? "disabled" : ""}>${this.saving || this.editingBusy ? "Saving…" : this.editing ? "Save edit" : "Queue message"}</button>` : ""}
+        <button class="title" data-action="expand" aria-label="${this.expanded ? "Collapse" : "Expand"} message queue" aria-expanded="${this.expanded}">${icon(this.expanded ? "chevron-down" : "chevron-right", 14)}${items.length ? `Queue <span class="count">${items.length}</span>` : "Queue next message"}</button>
+        ${items.length || this.state?.paused ? `<button data-action="pause" aria-label="${this.state?.paused ? "Resume" : "Pause"} queue">${icon(this.state?.paused ? "play" : "pause", 14)}${this.state?.paused ? "Resume" : "Pause"}</button>` : ""}
+        ${showAdd ? `<button class="add" data-action="enqueue" ${this.saving || this.editingBusy ? "disabled" : ""}>${icon(this.saving || this.editingBusy ? "loader" : this.editing ? "check" : "plus", 14)}${this.saving || this.editingBusy ? "Saving…" : this.editing ? "Save edit" : "Queue message"}</button>` : ""}
       </header>
-      ${this.expanded && items.length ? `<ol>${items.map((item, index) => this.itemHtml(item, index)).join("")}</ol><div class="hint">${status} · Stored in this Chrome profile</div>` : ""}
-      ${this.error ? `<div class="error" role="status">${escapeHtml(this.error)} <button data-action="check">Check again</button></div>` : ""}`;
+      ${this.expanded && items.length ? `<ol>${items.map((item, index) => this.itemHtml(item, index)).join("")}</ol>` : ""}
+      ${this.error ? `<div class="error" role="status">${escapeHtml(this.error)} <button data-action="check">Check again</button></div>` :
+        recovery ? `<div class="error" role="status">${recovery}</div>` : ""}`;
     }
     this.position();
   }

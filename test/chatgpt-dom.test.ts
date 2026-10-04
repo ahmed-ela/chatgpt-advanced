@@ -218,6 +218,31 @@ describe("queue DOM adapter", () => {
     expect(isChatBusy()).toBe(false);
   });
 
+  test("keeps the current initial response busy when typing replaces Stop with Send", () => {
+    layout('<button type="button" aria-label="Stop">Stop</button>');
+    const main = document.querySelector("main")!;
+    main.insertAdjacentHTML("beforeend", '<span aria-busy="true" role="status"><span class="sr-only">ChatGPT is responding</span><span aria-hidden="true" class="pulsing-dot"></span></span>');
+    expect(isChatBusy()).toBe(true);
+    const action = document.querySelector<HTMLButtonElement>("[aria-label='Stop']")!;
+    action.setAttribute("type", "submit");
+    action.setAttribute("aria-label", "Send");
+    findQueueComposer()!.textContent = "A follow-up draft";
+    expect(findQueueSendButton()).toBe(action);
+    expect(findQueueStopButton()).toBeNull();
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+    main.querySelector("[role='status']")!.remove();
+    expect(isChatBusy()).toBe(false);
+    expect(getAssistantCompletionAfter("user-1")).toBe(true);
+  });
+
+  test("response-status detection ignores hidden, idle and unrelated status controls", () => {
+    document.body.insertAdjacentHTML("beforeend", '<span aria-busy="true" role="status">Unrelated background task</span>');
+    document.querySelector("main")!.insertAdjacentHTML("beforeend", '<span hidden aria-busy="true" role="status">ChatGPT is responding</span><span aria-busy="false" role="status">Response complete</span>');
+    document.querySelector("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<span aria-busy="true" role="status">Preparing dictation</span>');
+    expect(isChatBusy()).toBe(false);
+  });
+
   test("does not confirm completion while generating or when route DOM is stale", () => {
     document.querySelector("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<button data-testid="stop-button">Stop</button>');
     expect(getAssistantCompletionAfter("user-1")).toBe(false);

@@ -162,6 +162,11 @@ export function writeComposer(element: QueueComposer, text: string): boolean {
 
 function hasLoadingState(): boolean {
   if (currentProvider() !== "chatgpt") return providerLoading(isVisible);
+  // Current ChatGPT replaces Stop with Send as soon as a draft is entered,
+  // including before its first animated thinking/answer body appears. The
+  // transcript's busy status remains present during that initial response.
+  if (Array.from(document.querySelectorAll("main [role='status'][aria-busy='true'], [role='main'] [role='status'][aria-busy='true']"))
+    .some((status) => isVisible(status) && !status.closest("[data-composer-body], form, [data-composer-surface]"))) return true;
   return Array.from(document.querySelectorAll(
     "main[aria-busy='true'], [role='main'][aria-busy='true'], [data-testid='conversation-loading'], [data-testid='conversation-loading-spinner'], [data-is-streaming='true'], [data-message-author-role='assistant'][aria-busy='true'], [data-markdown-text-style='assistant-message'][aria-busy='true']",
   )).some(isVisible);
@@ -292,6 +297,21 @@ function currentConversationMessages(): MessageRecord[] | null {
 
 export function isCurrentConversationReady(): boolean {
   return currentConversationMessages() !== null;
+}
+
+/**
+ * Gemini renumbers prompt indices on reload. Promote only a prompt we can
+ * still identify exactly in this route's DOM, never by repeated text alone.
+ * Keep getVisibleUserMessages IDs unchanged: switching them to turn IDs would
+ * make a pre-existing optimistic prompt appear newly sent to the ACK detector.
+ */
+export function getStableUserMessageAnchor(userId: string): string | null {
+  if (currentProvider() !== "gemini" || !/^gemini:user:user-query-content-\d+:[a-z0-9]+$/.test(userId)) return null;
+  const messages = currentConversationMessages();
+  if (!messages) return null;
+  const user = messages.find(message => message.role === "user" && message.id === userId);
+  const turn = user?.element.closest<HTMLElement>(".conversation-container[id]");
+  return turn && /^[0-9a-f]{16}$/i.test(turn.id) ? `gemini:user:${turn.id}` : null;
 }
 
 /** Absence of a stop button alone is not proof of an assistant's completion. */

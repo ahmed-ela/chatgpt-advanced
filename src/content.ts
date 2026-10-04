@@ -2,6 +2,8 @@ import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, isChatBusy, hasComposerAttachments,
   getAssistantMessageElements, findAssistantMessageElement, getAssistantMessageId, getProviderName,
 } from "./chatgpt-dom";
+import { icon } from "./icons";
+import { ANNOTATION_MESSAGE_TYPE, ANNOTATION_CHANGED_TYPE, getAnnotationKey } from "./annotation-store";
 
 type ComposerElement = HTMLTextAreaElement | HTMLElement;
 type NoteSide = "left" | "right";
@@ -87,7 +89,26 @@ const state = {
   draftText: "",
   notesMenuOpen: false,
   actionFeedback: "idle" as ActionFeedbackState,
+  actionError: "",
 };
+
+type NoteMutation = { action: "upsert"; note: PersistedNoteItem } | { action: "remove"; id: string };
+interface AnnotationSession {
+  route: string;
+  key: string | null;
+  notes: Map<string, PersistedNoteItem>;
+  saved: Map<string, PersistedNoteItem>;
+  pending: Map<string, NoteMutation>;
+  revision: number;
+  loaded: boolean;
+  loading: Promise<void> | null;
+  flushing: Promise<void> | null;
+  error: string;
+  migrationError: string;
+  draft: { selection: SelectionDraft; text: string } | null;
+}
+const annotationSessions = new Map<string, AnnotationSession>();
+let annotationUi: UiRefs | null = null;
 
 let selectionFrame = 0;
 let selectionSettleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -103,7 +124,6 @@ let restoreFrame = 0;
 let conversationPollTimer = 0;
 let restoreObserver: MutationObserver | null = null;
 let domRefreshObserver: MutationObserver | null = null;
-let sendClearTimer: number | null = null;
 let suppressActiveScrollClearUntil = 0;
 
 if (window.top === window) {
@@ -115,7 +135,8 @@ function bootstrap(): void {
 
   ensurePageStyles();
   const ui = createUi();
-  startDevHotReload();
+  annotationUi = ui;
+  if (__PLANNOTATOR_DEV__) startDevHotReload();
   startConversationPersistence(ui);
   startDomRefreshObserver(ui);
 
@@ -219,27 +240,20 @@ function bootstrap(): void {
     passive: true,
     capture: true,
   });
-  document.addEventListener("submit", () => {
-    queueNativeSendClear(ui, "submit");
-  }, true);
-  document.addEventListener("click", (event) => {
-    if (!hasNativeSendButtonInPath(event.composedPath())) return;
-    queueNativeSendClear(ui, "button");
-  }, true);
-  document.addEventListener("keydown", (event) => {
-    if (!isNativeComposerSendKey(event)) return;
-    queueNativeSendClear(ui, "enter");
-  }, true);
   window.addEventListener("pagehide", () => {
-    flushPersistedConversationState({ preserveExistingOnEmpty: true });
+    void flushPersistedConversationState();
   }, { capture: true });
+  window.addEventListener("beforeunload", event => {
+    if (!hasUnsavedAnnotationChanges()) return;
+    event.preventDefault(); event.returnValue = "";
+  });
 
   render(ui);
   void loadPersistedConversationState(ui);
 }
 
 function startDevHotReload(): void {
-  if (!DEV_ENABLED || !DEV_ORIGIN) return;
+  if (!__PLANNOTATOR_DEV__ || !__PLANNOTATOR_DEV_ORIGIN__) return;
 
   const runtime = (
     globalThis as typeof globalThis & {
@@ -268,7 +282,7 @@ function startDevHotReload(): void {
     const queueHost = document.getElementById("plannotator-message-queue");
     const queueShadow = queueHost?.shadowRoot;
     return Boolean(composer && !readComposer(composer).trim() && !isChatBusy() && !hasComposerAttachments() &&
-      !state.draftEditorOpen && !state.draftText.trim() && !persistTimer && state.actionFeedback !== "loading" &&
+      !state.draftEditorOpen && !state.draftText.trim() && !persistTimer && !hasUnsavedAnnotationChanges() && state.actionFeedback !== "loading" &&
       !noteShadow?.querySelector("textarea") && queueHost?.getAttribute("data-reload-blocked") !== "true" &&
       !queueShadow?.querySelector("textarea, button[data-action='enqueue']:disabled"));
   };
@@ -383,6 +397,9 @@ function createUi(): UiRefs {
       :host {
         all: initial;
       }
+
+      .icon { display: block; flex: none; pointer-events: none; }
+      button:focus-visible { outline: 2px solid #458cff; outline-offset: 3px; }
 
       .shell {
         position: fixed;
@@ -600,6 +617,14 @@ function createUi(): UiRefs {
       .notes-menu-row.active {
         background: rgba(251, 191, 36, 0.22);
       }
+      .notes-menu-item { display: flex; align-items: center; }
+      .notes-menu-item .notes-menu-row { min-width: 0; }
+      .notes-menu-delete { flex: none; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: #64748b; cursor: pointer; }
+      .notes-menu-delete:hover { background: #fee2e2; color: #b91c1c; }
+      .notes-help { padding: 8px; margin: 0; font-size: 11px; color: #64748b; }
+      .notes-status { max-width: min(340px, calc(100vw - 150px)); padding: 8px 10px; border-radius: 8px; background: white; box-shadow: 0 4px 18px #0f172a22; font-size: 12px; }
+      .notes-status.error { color: #991b1b; }
+      .notes-status button { margin-left: 6px; font: inherit; cursor: pointer; }
 
       .notes-menu-index {
         width: 22px;
@@ -640,13 +665,11 @@ function createUi(): UiRefs {
       }
 
       .notes-action-spinner {
-        width: 16px;
-        height: 16px;
-        border-radius: 999px;
-        border: 2px solid rgba(255, 255, 255, 0.35);
-        border-top-color: white;
-        box-sizing: border-box;
         animation: notes-action-spin 720ms linear infinite;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .notes-action-spinner { animation: none; }
       }
 
       @keyframes notes-action-spin {
@@ -677,7 +700,7 @@ function createUi(): UiRefs {
   const actionsLayer = shadow.getElementById("actions-layer") as HTMLDivElement | null;
 
   if (!markersLayer || !popoverLayer || !actionsLayer) {
-    throw new Error("Plannotator extension failed to initialize its UI");
+    throw new Error("Threadlane extension failed to initialize its UI");
   }
 
   const ui: UiRefs = {
@@ -710,17 +733,27 @@ function createUi(): UiRefs {
   shadow.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (!target) return;
+    if (target.closest("[data-action='retry-notes']")) {
+      void retryAnnotationSave();
+      return;
+    }
 
     if (target.closest("[data-action='open-draft']")) {
+      if (event instanceof MouseEvent && event.detail === 0) {
+        state.draftEditorOpen = true;
+        state.activeNoteId = null;
+        render(ui);
+      }
       return;
     }
 
     if (target.closest("[data-action='insert-notes']")) {
+      if (event instanceof MouseEvent && event.detail === 0 && state.notes.length > 0 && state.actionFeedback === "idle") void insertPrompt(ui);
       return;
     }
 
     if (target.closest("[data-action='toggle-notes-menu']")) {
-      if (state.notes.length === 0) return;
+      if (allConversationNotes().length === 0) return;
       state.notesMenuOpen = !state.notesMenuOpen;
       render(ui);
       return;
@@ -732,8 +765,9 @@ function createUi(): UiRefs {
       return;
     }
 
-    if (target.dataset.action === "delete-note") {
-      const noteId = target.closest<HTMLElement>("[data-note-id]")?.dataset.noteId;
+    const deleteTarget = target.closest<HTMLElement>("[data-action='delete-note']");
+    if (deleteTarget) {
+      const noteId = deleteTarget.closest<HTMLElement>("[data-note-id]")?.dataset.noteId;
       if (!noteId) return;
       deleteNote(noteId);
       render(ui);
@@ -744,6 +778,11 @@ function createUi(): UiRefs {
   });
 
   const updateNoteField = (target: HTMLTextAreaElement | HTMLInputElement): void => {
+    if (currentConversationKey !== getConversationStorageKey()) {
+      if (target.dataset.field === "draft") state.draftText = target.value;
+      ensureAnnotationRoute();
+      return;
+    }
     if (target.dataset.field === "draft") state.draftText = target.value;
     else {
       const noteId = target.closest<HTMLElement>("[data-note-id]")?.dataset.noteId;
@@ -797,9 +836,7 @@ function reanchorDetachedNotes(): void {
     return [restored];
   });
 
-  if (changed) {
-    schedulePersistedConversationState();
-  }
+  // Reanchoring only changes the current DOM range; it is not a user edit.
 }
 
 function renderMarkers(ui: UiRefs): void {
@@ -809,7 +846,12 @@ function renderMarkers(ui: UiRefs): void {
 function renderActions(ui: UiRefs): void {
   const isLoading = state.actionFeedback === "loading";
   const isSuccess = state.actionFeedback === "inserted";
-  if (state.notes.length === 0 && !isLoading && !isSuccess) {
+  const notes = allConversationNotes();
+  const session = currentAnnotationSession();
+  const otherUnsaved = Array.from(annotationSessions.values()).find(entry => entry !== session && (entry.pending.size > 0 || entry.draft?.text.trim() || (!entry.key && entry.notes.size)));
+  const error = session.error || session.migrationError || state.actionError;
+  const status = error || (session.pending.size || session.loading || session.flushing ? "Saving notes…" : "");
+  if (notes.length === 0 && !isLoading && !isSuccess && !status && !otherUnsaved) {
     ui.actionsLayer.innerHTML = "";
     return;
   }
@@ -823,10 +865,10 @@ function renderActions(ui: UiRefs): void {
     }
   }
 
-  const menu = state.notesMenuOpen && state.notes.length > 0
+  const menu = state.notesMenuOpen && notes.length > 0
     ? renderNotesMenu()
     : "";
-  const toggleButton = state.notes.length > 0
+  const toggleButton = notes.length > 0
     ? `
     <button
       class="notes-list-toggle${state.notesMenuOpen ? " active" : ""}"
@@ -835,13 +877,15 @@ function renderActions(ui: UiRefs): void {
       title="Show notes"
       aria-label="Show notes"
       aria-expanded="${state.notesMenuOpen ? "true" : "false"}"
-    >${state.notes.length}</button>
+    >${notes.length}</button>
   `
     : "";
 
   ui.actionsLayer.innerHTML = `
     <div class="notes-toolbar" style="bottom:${bottom}px;">
       ${menu}
+      ${status ? `<span class="notes-status${error ? " error" : ""}" role="${error ? "alert" : "status"}">${escapeHtml(status)}${session.error || session.migrationError ? '<button data-action="retry-notes" type="button">Retry save</button>' : ""}</span>` : ""}
+      ${otherUnsaved ? `<span class="notes-status error" role="alert">Notes in another chat are not saved. <a href="${escapeHtml(otherUnsaved.route.slice(STORAGE_KEY_PREFIX.length))}">Return to save</a></span>` : ""}
       ${toggleButton}
     <button
       class="notes-action${isLoading ? " loading" : ""}${isSuccess ? " success" : ""}"
@@ -850,17 +894,13 @@ function renderActions(ui: UiRefs): void {
       title="${isLoading ? "Inserting into" : isSuccess ? "Inserted into" : "Insert notes into"} ${getProviderName()}"
       aria-label="${isLoading ? "Inserting into" : isSuccess ? "Inserted into" : "Insert notes into"} ${getProviderName()}"
       data-state="${isLoading ? "loading" : isSuccess ? "success" : "idle"}"
-      ${isLoading || isSuccess ? "disabled" : ""}
+      ${isLoading || isSuccess || state.notes.length === 0 ? "disabled" : ""}
     >
       ${isLoading
-        ? `<span class="notes-action-spinner" aria-hidden="true"></span>`
+        ? icon("loader", 16, "notes-action-spinner")
         : isSuccess
-        ? `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path fill="currentColor" d="M6.55 11.64 2.91 8l1.06-1.06 2.58 2.58 5.48-5.48L13.09 5.1z"/>
-      </svg>`
-        : `<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path fill="currentColor" d="M2 8.75h7.19L6.47 11.47 7.53 12.53 12.06 8 7.53 3.47 6.47 4.53 9.19 7.25H2z"/>
-      </svg>`}
+        ? icon("check")
+        : icon("arrow-right")}
     </button>
     </div>
   `;
@@ -869,11 +909,13 @@ function renderActions(ui: UiRefs): void {
 function renderNotesMenu(): string {
   return `
     <section class="notes-menu" aria-label="Saved notes">
-      ${getOrderedNotes().map((note, index) => `
+      <p class="notes-help">Saved notes remain until you delete them.</p>
+      ${allConversationNotes().map((note, index) => `
+        <div class="notes-menu-item" data-note-id="${escapeHtml(note.id)}">
         <button
           class="notes-menu-row${note.id === state.activeNoteId ? " active" : ""}"
           data-action="jump-note"
-          data-note-id="${note.id}"
+          data-note-id="${escapeHtml(note.id)}"
           type="button"
           title="${escapeHtml(note.comment || note.quote)}"
           aria-label="Jump to note ${index + 1}"
@@ -884,6 +926,8 @@ function renderNotesMenu(): string {
             <span class="notes-menu-quote">${escapeHtml(truncateInline(note.quote, 90))}</span>
           </span>
         </button>
+        <button class="notes-menu-delete" data-action="delete-note" type="button" aria-label="Delete note ${index + 1}" title="Delete note ${index + 1}">${icon("trash")}</button>
+        </div>
       `).join("")}
     </section>
   `;
@@ -916,7 +960,7 @@ function renderPopover(ui: UiRefs): void {
         aria-label="Add note"
         title="Add note"
         style="left:${triggerX}px;top:${triggerY}px;"
-      >+</button>
+      >${icon("plus")}</button>
     `;
     return;
   }
@@ -1001,6 +1045,7 @@ function getSelectionDraftKey(draft: SelectionDraft): string {
 }
 
 function syncSelectionDraft(ui: UiRefs): void {
+  syncAnnotationRoute(ui);
   if (isDraftInputFocused(ui)) {
     return;
   }
@@ -1078,6 +1123,7 @@ function getSelectionDraft(): SelectionDraft | null {
 }
 
 function commitDraftNote(): void {
+  if (!ensureAnnotationRoute()) return;
   const draft = state.selectionDraft;
   if (!draft) return;
 
@@ -1105,10 +1151,11 @@ function commitDraftNote(): void {
   state.notes.push(note);
   state.activeNoteId = null;
   clearSelectionDraft();
-  schedulePersistedConversationState();
+  queueAnnotationMutation({ action: "upsert", note: serializeNote(note) }, true);
 }
 
 function updateNote(noteId: string, updates: Partial<Pick<NoteItem, "comment">>): void {
+  if (!ensureAnnotationRoute()) return;
   const note = state.notes.find((entry) => entry.id === noteId);
   if (!note) return;
 
@@ -1116,16 +1163,18 @@ function updateNote(noteId: string, updates: Partial<Pick<NoteItem, "comment">>)
     note.comment = updates.comment;
   }
 
-  schedulePersistedConversationState();
+  queueAnnotationMutation({ action: "upsert", note: serializeNote(note) });
 }
 
 function deleteNote(noteId: string): void {
+  if (!ensureAnnotationRoute()) return;
   const remaining = getOrderedNotes().filter((note) => note.id !== noteId);
   state.notes = remaining;
   if (state.activeNoteId === noteId) {
     state.activeNoteId = remaining.at(-1)?.id ?? null;
   }
-  schedulePersistedConversationState();
+  pendingRestoreNotes = pendingRestoreNotes.filter(note => note.id !== noteId);
+  queueAnnotationMutation({ action: "remove", id: noteId }, true);
 }
 
 function commitActiveNote(noteId: string): void {
@@ -1139,10 +1188,12 @@ function commitActiveNote(noteId: string): void {
   }
 
   state.activeNoteId = null;
-  schedulePersistedConversationState();
+  queueAnnotationMutation({ action: "upsert", note: serializeNote(note) }, true);
 }
 
 function clearAllNotes(): void {
+  if (!ensureAnnotationRoute()) return;
+  const ids = allConversationNotes().map(note => note.id);
   state.notes = [];
   state.activeNoteId = null;
   state.notesMenuOpen = false;
@@ -1153,7 +1204,8 @@ function clearAllNotes(): void {
   const cssHighlights = (CSS as unknown as { highlights?: MapLike }).highlights;
   cssHighlights?.set(HIGHLIGHT_NAME, new Highlight());
   cssHighlights?.set(ACTIVE_HIGHLIGHT_NAME, new Highlight());
-  schedulePersistedConversationState();
+  for (const id of ids) queueAnnotationMutation({ action: "remove", id });
+  void flushPersistedConversationState();
 }
 
 function buildPrompt(): string {
@@ -1171,29 +1223,43 @@ function buildPrompt(): string {
 }
 
 async function insertPrompt(ui: UiRefs): Promise<void> {
+  if (!ensureAnnotationRoute()) return;
   if (state.notes.length === 0 || state.actionFeedback === "loading") {
     return;
   }
 
   const composer = findComposer();
   if (!composer) {
-    console.warn("[Plannotator] Composer not found.");
+    state.actionError = "The composer is unavailable. Your notes are still saved here.";
+    render(ui);
+    return;
+  }
+  if (getComposerText(composer).trim() || hasComposerAttachments()) {
+    state.actionError = "Send or clear the current draft before inserting notes.";
+    render(ui);
     return;
   }
 
+  const route = getConversationStorageKey();
+  const prompt = buildPrompt();
+  state.actionError = "";
   clearActionFeedback();
   state.actionFeedback = "loading";
   render(ui);
   await nextPaint();
 
-  const prompt = buildPrompt();
-  if (!setComposerText(composer, prompt)) {
+  if (route !== getConversationStorageKey() || !composer.isConnected || findComposer() !== composer || getComposerText(composer).trim() || hasComposerAttachments()) {
     clearActionFeedback();
+    state.actionError = "The conversation or draft changed. Your notes were kept.";
     render(ui);
     return;
   }
-  clearAllNotes();
-  flushPersistedConversationState();
+  if (!setComposerText(composer, prompt)) {
+    clearActionFeedback();
+    state.actionError = "Could not insert notes. Your notes were kept.";
+    render(ui);
+    return;
+  }
   showInsertSuccess(ui);
   render(ui);
 }
@@ -1201,23 +1267,43 @@ async function insertPrompt(ui: UiRefs): Promise<void> {
 function startConversationPersistence(ui: UiRefs): void {
   currentConversationKey = getConversationStorageKey();
   if (conversationPollTimer) return;
+  annotationRuntime()?.onMessage?.addListener(message => {
+    const session = currentAnnotationSession();
+    if (message.type === ANNOTATION_CHANGED_TYPE && message.key === session.key) void refreshAnnotationSession(session);
+  });
+  conversationPollTimer = window.setInterval(() => syncAnnotationRoute(ui), CONVERSATION_POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void refreshAnnotationSession(currentAnnotationSession());
+  });
+}
 
-  conversationPollTimer = window.setInterval(() => {
-    const nextKey = getConversationStorageKey();
-    if (nextKey === currentConversationKey) return;
+function syncAnnotationRoute(ui: UiRefs): void {
+  const nextKey = getConversationStorageKey();
+  if (nextKey === currentConversationKey) return;
+  const previous = currentAnnotationSession();
+  if (state.selectionDraft && state.draftText.trim()) previous.draft = { selection: state.selectionDraft, text: state.draftText };
+  // Pending writes already carry their original conversation. Never retarget
+  // them or replace a new page with an old request's eventual callback.
+  stopRestoreObserver();
+  pendingRestoreNotes = [];
+  clearActionFeedback();
+  clearSelectionDraft(false);
+  state.notes = []; state.activeNoteId = null; state.notesMenuOpen = false; state.actionError = "";
+  currentConversationKey = nextKey;
+  const next = currentAnnotationSession();
+  if (next.draft) {
+    state.selectionDraft = next.draft.selection; state.draftText = next.draft.text; state.draftEditorOpen = true;
+  }
+  applyAnnotationSession(next);
+  render(ui);
+  void loadPersistedConversationState(ui);
+}
 
-    flushPersistedConversationState({ preserveExistingOnEmpty: true });
-    stopRestoreObserver();
-    pendingRestoreNotes = [];
-    clearActionFeedback();
-    clearSelectionDraft();
-    state.notes = [];
-    state.activeNoteId = null;
-    state.notesMenuOpen = false;
-    currentConversationKey = nextKey;
-    render(ui);
-    void loadPersistedConversationState(ui);
-  }, CONVERSATION_POLL_MS);
+function ensureAnnotationRoute(): boolean {
+  if (!currentConversationKey) { currentConversationKey = getConversationStorageKey(); return true; }
+  if (currentConversationKey === getConversationStorageKey()) return true;
+  if (annotationUi) syncAnnotationRoute(annotationUi);
+  return false;
 }
 
 function startDomRefreshObserver(ui: UiRefs): void {
@@ -1240,78 +1326,196 @@ function startDomRefreshObserver(ui: UiRefs): void {
 }
 
 async function loadPersistedConversationState(ui: UiRefs): Promise<void> {
-  currentConversationKey = getConversationStorageKey();
-  pendingRestoreNotes = readPersistedConversationState(currentConversationKey);
-  state.notes = [];
-  state.activeNoteId = null;
-  state.notesMenuOpen = false;
-
-  if (pendingRestoreNotes.length === 0) {
-    stopRestoreObserver();
-    render(ui);
-    return;
-  }
-
-  scheduleRestorePendingNotes(ui);
+  annotationUi = ui;
+  currentConversationKey ??= getConversationStorageKey();
+  const session = currentAnnotationSession();
+  await loadAnnotationSession(session);
+  if (session.pending.size) await flushAnnotationSession(session);
 }
 
 function schedulePersistedConversationState(): void {
-  currentConversationKey ??= getConversationStorageKey();
-  if (persistTimer) {
-    clearTimeout(persistTimer);
-  }
-
+  if (persistTimer) clearTimeout(persistTimer);
+  const session = currentAnnotationSession();
   persistTimer = window.setTimeout(() => {
     persistTimer = null;
-    flushPersistedConversationState();
+    void flushAnnotationSession(session);
   }, PERSIST_DEBOUNCE_MS);
 }
 
-function flushPersistedConversationState(options: { preserveExistingOnEmpty?: boolean } = {}): void {
-  if (persistTimer) {
-    clearTimeout(persistTimer);
-    persistTimer = null;
+async function flushPersistedConversationState(): Promise<void> {
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+  await flushAnnotationSession(currentAnnotationSession());
+}
+
+function annotationRuntime(): { sendMessage(message: unknown): Promise<unknown>; onMessage?: { addListener(listener: (message: { type?: string; key?: string }) => void): void } } | undefined {
+  return (globalThis as unknown as { chrome?: { runtime?: ReturnType<typeof annotationRuntime> } }).chrome?.runtime;
+}
+
+function currentAnnotationSession(): AnnotationSession {
+  const route = currentConversationKey ?? getConversationStorageKey();
+  let session = annotationSessions.get(route);
+  if (!session) {
+    session = { route, key: getAnnotationKey(route.slice(STORAGE_KEY_PREFIX.length)), notes: new Map(), saved: new Map(), pending: new Map(), revision: -1, loaded: false, loading: null, flushing: null, error: "", migrationError: "", draft: null };
+    annotationSessions.set(route, session);
   }
+  return session;
+}
 
-  currentConversationKey ??= getConversationStorageKey();
-  if (!currentConversationKey) return;
+function allConversationNotes(): PersistedNoteItem[] {
+  const notes = new Map(currentAnnotationSession().notes);
+  for (const note of pendingRestoreNotes) if (!notes.has(note.id)) notes.set(note.id, note);
+  for (const note of state.notes) notes.set(note.id, serializeNote(note));
+  return Array.from(notes.values()).sort((a, b) => a.createdAt - b.createdAt);
+}
 
-  try {
-    const payload = serializePersistedNotes();
-    if (payload.length === 0) {
-      if (!options.preserveExistingOnEmpty) {
-        window.localStorage.removeItem(currentConversationKey);
-      }
-      return;
-    }
+function hasUnsavedAnnotationChanges(): boolean {
+  return Boolean(state.draftText.trim() || Array.from(annotationSessions.values()).some(session => session.pending.size || session.draft?.text.trim() || (!session.key && session.notes.size)));
+}
 
-    window.localStorage.setItem(currentConversationKey, JSON.stringify(payload));
-  } catch {
-    // Ignore storage failures to keep note-taking fast.
+function applyAnnotationSession(session: AnnotationSession): void {
+  if (session.route !== currentConversationKey || session.route !== getConversationStorageKey()) return;
+  const old = new Map(state.notes.map(note => [note.id, note]));
+  state.notes = []; pendingRestoreNotes = [];
+  for (const note of session.notes.values()) {
+    const restored = restorePersistedNote(note);
+    const previous = old.get(note.id);
+    if (restored) state.notes.push(restored);
+    else if (previous) state.notes.push({ ...previous, comment: note.comment });
+    else pendingRestoreNotes.push(note);
+  }
+  if (annotationUi) {
+    if (pendingRestoreNotes.length) scheduleRestorePendingNotes(annotationUi);
+    render(annotationUi);
   }
 }
 
-function queueNativeSendClear(ui: UiRefs, trigger: "button" | "enter" | "submit"): void {
-  // An automatic queued send may be unrelated to annotations currently being
-  // collected. Keep those notes until the user inserts or sends them.
-  if (findComposer()?.hasAttribute("data-plannotator-queued-send")) return;
-  if (state.notes.length === 0) return;
+function acceptAnnotationSnapshot(session: AnnotationSession, reply: { notes: PersistedNoteItem[]; revision: number }): void {
+  if (reply.revision >= session.revision) {
+    session.revision = reply.revision;
+    session.saved = new Map(reply.notes.map(note => [note.id, note]));
+  }
+  session.notes = new Map(session.saved);
+  for (const [id, mutation] of session.pending) {
+    if (mutation.action === "remove") session.notes.delete(id);
+    else session.notes.set(id, mutation.note);
+  }
+  applyAnnotationSession(session);
+}
 
-  if (trigger === "enter" && !canComposerSend()) {
+async function annotationRequest(session: AnnotationSession, action: string, extra: Record<string, unknown> = {}): Promise<{ notes: PersistedNoteItem[]; revision: number }> {
+  if (!session.key) throw new Error("Open a saved conversation to save these notes.");
+  const runtime = annotationRuntime();
+  if (!runtime?.sendMessage) throw new Error("Extension storage is unavailable. Keep this tab open and retry saving.");
+  const reply = await runtime.sendMessage({ type: ANNOTATION_MESSAGE_TYPE, key: session.key, action, ...extra }) as { ok?: boolean; notes?: PersistedNoteItem[]; revision?: number; error?: string };
+  if (!reply?.ok || !Array.isArray(reply.notes) || typeof reply.revision !== "number") throw new Error(reply?.error || "The save was not confirmed. Keep this tab open and retry saving.");
+  return { notes: reply.notes, revision: reply.revision };
+}
+
+function annotationFailure(session: AnnotationSession, error: unknown): void {
+  session.error = `Notes not saved: ${error instanceof Error ? error.message : String(error)}`;
+  applyAnnotationSession(session);
+}
+
+async function loadAnnotationSession(session: AnnotationSession): Promise<void> {
+  // Home, temporary and optimistic conversation URLs have no durable key.
+  // Merely opening one is not a failed save. Keep actual local work protected
+  // without sending an invalid read or pretending it reached storage.
+  if (!session.key) {
+    let raw: string | null = null;
+    session.migrationError = "";
+    try {
+      raw = window.localStorage.getItem(session.route);
+      if (raw) {
+        const legacy: unknown = JSON.parse(raw);
+        if (!Array.isArray(legacy) || !legacy.every(isPersistedNoteItem)) throw new Error("The original notes could not be read.");
+        for (const note of legacy) {
+          if (!session.notes.has(note.id) && !session.pending.has(note.id)) session.notes.set(note.id, note);
+        }
+      }
+    } catch {
+      // A nonempty legacy payload is real work even if its format is unknown.
+      // Keep that source intact; an inaccessible empty page is not a failed save.
+      if (raw) session.migrationError = "Existing notes could not be read. Their original copy has been kept.";
+    }
+    session.error = session.notes.size || session.pending.size
+      ? "This chat is not saved. These notes are not saved in extension storage; keep this tab open."
+      : "";
+    applyAnnotationSession(session);
     return;
   }
+  if (session.loading) return session.loading;
+  session.loading = Promise.resolve().then(async () => {
+    try {
+      let raw: string | null = null;
+      let legacy: PersistedNoteItem[] = [];
+      session.migrationError = "";
+      try {
+        raw = window.localStorage.getItem(session.route);
+        if (raw) {
+          const parsed: unknown = JSON.parse(raw);
+          if (!Array.isArray(parsed) || !parsed.every(isPersistedNoteItem)) throw new Error("The original notes could not be read.");
+          legacy = parsed;
+          for (const note of legacy) if (!session.notes.has(note.id)) session.notes.set(note.id, note);
+          applyAnnotationSession(session);
+        }
+      } catch (error) {
+        raw = null;
+        session.migrationError = `Legacy notes were kept but could not be imported: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      const reply = await annotationRequest(session, raw ? "import" : "read", raw ? { notes: legacy } : {});
+      acceptAnnotationSnapshot(session, reply);
+      // Do not delete a legacy copy changed while the import was in flight.
+      if (raw && window.localStorage.getItem(session.route) === raw) window.localStorage.removeItem(session.route);
+      session.loaded = true; session.error = "";
+    } catch (error) { annotationFailure(session, error); }
+  }).finally(() => { session.loading = null; applyAnnotationSession(session); });
+  return session.loading;
+}
 
-  if (sendClearTimer) {
-    clearTimeout(sendClearTimer);
-  }
+async function refreshAnnotationSession(session: AnnotationSession): Promise<void> {
+  if (!session.loaded) { await loadAnnotationSession(session); return; }
+  try { acceptAnnotationSnapshot(session, await annotationRequest(session, "read")); }
+  catch (error) { annotationFailure(session, error); }
+}
 
-  sendClearTimer = window.setTimeout(() => {
-    sendClearTimer = null;
-    clearActionFeedback();
-    clearAllNotes();
-    flushPersistedConversationState();
-    render(ui);
-  }, trigger === "button" ? 0 : 90);
+function queueAnnotationMutation(mutation: NoteMutation, immediate = false): void {
+  const session = currentAnnotationSession();
+  const id = mutation.action === "remove" ? mutation.id : mutation.note.id;
+  session.pending.set(id, mutation);
+  if (mutation.action === "remove") session.notes.delete(id);
+  else session.notes.set(id, mutation.note);
+  session.error = "";
+  if (immediate) void flushAnnotationSession(session);
+  else schedulePersistedConversationState();
+}
+
+async function flushAnnotationSession(session: AnnotationSession): Promise<void> {
+  if (session.flushing) return session.flushing;
+  session.flushing = (async () => {
+    if (!session.loaded) await loadAnnotationSession(session);
+    if (!session.loaded) return;
+    try {
+      while (session.pending.size) {
+        const action = session.pending.values().next().value!.action;
+        const batch = Array.from(session.pending.entries()).filter(([, mutation]) => mutation.action === action);
+        const extra = action === "remove" ? { ids: batch.map(([id]) => id) } : { notes: batch.map(([, mutation]) => (mutation as Extract<NoteMutation, { action: "upsert" }>).note) };
+        const reply = await annotationRequest(session, action, extra);
+        for (const [id, mutation] of batch) if (session.pending.get(id) === mutation) session.pending.delete(id);
+        acceptAnnotationSnapshot(session, reply);
+        session.error = "";
+      }
+    } catch (error) { annotationFailure(session, error); }
+  })().finally(() => { session.flushing = null; applyAnnotationSession(session); });
+  return session.flushing;
+}
+
+async function retryAnnotationSave(): Promise<void> {
+  if (!ensureAnnotationRoute()) return;
+  const session = currentAnnotationSession();
+  session.error = "";
+  await loadAnnotationSession(session);
+  await flushAnnotationSession(session);
+  applyAnnotationSession(session);
 }
 
 function hasNativeSendButtonInPath(path: Array<EventTarget | undefined>): boolean {
@@ -1553,7 +1757,8 @@ function scheduleRender(ui: UiRefs): void {
   });
 }
 
-function clearSelectionDraft(): void {
+function clearSelectionDraft(forgetStored = true): void {
+  if (forgetStored) currentAnnotationSession().draft = null;
   cancelDraftFocus();
   selectionVersion += 1;
   if (selectionSettleTimer) {
@@ -1734,7 +1939,11 @@ function isPersistedNoteItem(value: unknown): value is PersistedNoteItem {
 }
 
 function serializePersistedNotes(): PersistedNoteItem[] {
-  return getOrderedNotes().map((note) => ({
+  return getOrderedNotes().map(serializeNote);
+}
+
+function serializeNote(note: NoteItem): PersistedNoteItem {
+  return {
     id: note.id,
     messageId: note.messageId,
     messageExcerpt: note.messageExcerpt,
@@ -1745,7 +1954,7 @@ function serializePersistedNotes(): PersistedNoteItem[] {
     startOffset: note.startOffset,
     endOffset: note.endOffset,
     createdAt: note.createdAt,
-  }));
+  };
 }
 
 function scheduleRestorePendingNotes(ui: UiRefs): void {
@@ -1787,9 +1996,8 @@ function restorePendingNotes(ui: UiRefs): void {
   pendingRestoreNotes = unresolved;
   render(ui);
 
-  if (upgradedPersistedState) {
-    schedulePersistedConversationState();
-  }
+  // Restoring ranges is not a note edit. Preserve the durable record until an
+  // explicit mutation instead of rewriting snapshots that omit unloaded notes.
 
   if (pendingRestoreNotes.length > 0) {
     ensureRestoreObserver(ui);
@@ -2234,7 +2442,7 @@ interface MapLike {
 }
 
 function setDevReloadState(value: string): void {
-  if (!DEV_ENABLED) return;
+  if (!__PLANNOTATOR_DEV__) return;
   const host = document.getElementById(ROOT_ID);
   if (host) {
     host.dataset.reloadState = value;

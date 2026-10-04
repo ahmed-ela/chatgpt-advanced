@@ -1,25 +1,1690 @@
-(()=>{var{defineProperty:$Z,getOwnPropertyNames:R0,getOwnPropertyDescriptor:E0}=Object,N0=Object.prototype.hasOwnProperty;var SZ=new WeakMap,d1=(Z)=>{var $=SZ.get(Z),J;if($)return $;if($=$Z({},"__esModule",{value:!0}),Z&&typeof Z==="object"||typeof Z==="function")R0(Z).map((Y)=>!N0.call($,Y)&&$Z($,Y,{get:()=>Z[Y],enumerable:!(J=E0(Z,Y))||J.enumerable}));return SZ.set(Z,$),$};var i1=(Z,$)=>{for(var J in $)$Z(Z,J,{get:$[J],enumerable:!0,configurable:!0,set:(Y)=>$[J]=()=>Y})};var a1="plannotator:queue",n1="plannotator:queue:changed";function YZ(Z){try{let $=new URL(Z);if($.username||$.password)return null;if($.protocol==="https:"&&$.hostname==="chatgpt.com"){let J=$.pathname.match(/(?:^|\/)c\/([A-Za-z0-9_-]+)(?:\/|$)/);return J?`chatgpt:${J[1]}`:null}if($.origin==="https://claude.ai"){let J=$.pathname.match(/^\/chat\/([A-Za-z0-9_-]{1,128})\/?$/);return J?`claude:${J[1]}`:null}if($.origin==="https://gemini.google.com"){let J=$.pathname.match(/^\/app\/([A-Za-z0-9_-]{1,128})\/?$/);return J?`gemini:${J[1]}`:null}if($.protocol==="http:"&&["localhost","127.0.0.1"].includes($.hostname))return`fixture:${$.origin}${$.pathname}`}catch{}return null}class z0{factory;name;connection;constructor(Z=indexedDB,$="plannotator-message-queue-v1"){this.factory=Z;this.name=$}database(){if(!this.connection)this.connection=new Promise((Z,$)=>{let J=this.factory.open(this.name,1);J.onupgradeneeded=()=>J.result.createObjectStore("queues",{keyPath:"key"}),J.onerror=()=>{this.connection=void 0,$(J.error??Error("Could not open queue storage"))},J.onblocked=()=>{this.connection=void 0,$(Error("Queue storage is busy; close older extension pages and retry"))},J.onsuccess=()=>{let Y=J.result;Y.onversionchange=()=>{Y.close(),this.connection=void 0},Z(Y)}});return this.connection}async close(){if(this.connection)(await this.connection).close();this.connection=void 0}async apply(Z,$,J=Date.now()){if(L0(Z),!$||$.length>256)throw Error("Invalid queue client");let Y=await this.database();return new Promise((X,j)=>{let D=Y.transaction("queues","readwrite",{durability:"strict"}),U=D.objectStore("queues"),G=U.get(Z.key),V,W;G.onsuccess=()=>{try{let _=G.result??{key:Z.key,revision:0,paused:!1,items:[],busyLeases:[]},O=JSON.stringify(_);k0(_,J);let M=I0(_,Z,$,J),h=JSON.stringify(_)!==O;if(h)_.revision+=1,U.put(_);let{retiredIds:m1,editReceipts:c1,busyLeases:l1,legacyBusyUntil:u1,...P0}=_;V={state:structuredClone(P0),changed:h,...M?{claimed:structuredClone(M)}:{}}}catch(_){W=_,D.abort()}},D.oncomplete=()=>V?X(V):j(Error("Queue storage returned no result")),D.onabort=()=>j(W??D.error??Error("Queue storage transaction failed")),D.onerror=()=>{W??=D.error}})}}function L0(Z){if(!Z||Z.type!=="plannotator:queue"||typeof Z.key!=="string"||Z.key.length>2048||!/^(chatgpt|claude|gemini|fixture):/.test(Z.key))throw Error("Invalid queue conversation");if(typeof Z.clientId!=="string"||!/^[A-Za-z0-9:_-]{1,128}$/.test(Z.clientId))throw Error("Invalid queue client");if(!["read","enqueue","begin-edit","edit-heartbeat","cancel-edit","steer","edit","move","remove","pause","heartbeat","claim","attempt","ack","complete","release","review","retry"].includes(Z.action))throw Error("Unknown queue action");if(Z.id!==void 0&&(typeof Z.id!=="string"||!/^[A-Za-z0-9:_-]{1,128}$/.test(Z.id)))throw Error("Invalid queued message ID");if(Z.editToken!==void 0&&(typeof Z.editToken!=="string"||!/^[A-Za-z0-9:_-]{1,128}$/.test(Z.editToken)))throw Error("Invalid queue edit token");if(["begin-edit","edit-heartbeat","cancel-edit"].includes(Z.action)&&!Z.editToken)throw Error("Missing queue edit token");if(Z.afterUserMessageId!==void 0&&(typeof Z.afterUserMessageId!=="string"||!Z.afterUserMessageId||Z.afterUserMessageId.length>256))throw Error("Invalid queue transcript anchor");if(["enqueue","edit"].includes(Z.action)&&(typeof Z.text!=="string"||!Z.text.trim()||Z.text.length>200000))throw Error(`Queued messages must contain 1–${200000 .toLocaleString()} characters`)}function k0(Z,$){for(let J of Z.items){if(J.status==="editing"&&(J.leaseUntil??0)<=$)z(J),Z.paused=!0;if(J.status==="claimed"&&(J.leaseUntil??0)<=$)z(J);if(J.status==="sending"&&(J.attemptedAt??0)+30000<=$)J.status="review",J.reason="Delivery could not be confirmed. Check the chat before retrying to avoid a duplicate.",delete J.leaseUntil}TZ(Z,$)}function TZ(Z,$){if(!Z.busyLeases){if((Z.busyUntil??0)>$)Z.legacyBusyUntil=Math.max(Z.legacyBusyUntil??0,Z.busyUntil);Z.busyLeases=[]}if(Z.busyLeases=Z.busyLeases.filter((Y)=>Y.until>$),(Z.legacyBusyUntil??0)<=$)delete Z.legacyBusyUntil;let J=Z.busyLeases.reduce((Y,X)=>Math.max(Y,X.until),Z.legacyBusyUntil??0);if(J>$)Z.busyUntil=J;else delete Z.busyUntil}function I0(Z,$,J,Y){let X=Z.items.find((G)=>G.id===$.id),j=()=>{if(!X)throw Error("This queued message is no longer available");return X},D=(G)=>{let V=j();if(V.status!==G||V.owner!==J)throw Error("This queued message is being handled by another tab or has changed");return V},U=()=>{let G=D("editing");if(G.editToken!==$.editToken)throw Error("This edit session has changed; reopen the queued message");return G};switch($.action){case"read":return;case"heartbeat":{if($.busy===!0||$.busy===!1){let G=Z.busyLeases.find((V)=>V.owner===J);if(Z.busyLeases=Z.busyLeases.filter((V)=>V.owner!==J),$.busy)Z.busyLeases.push({owner:J,until:Math.max(G?.until??0,Y+3000)});TZ(Z,Y)}return}case"enqueue":if(!$.id)throw Error("Missing queued message ID");if(X||Z.retiredIds?.includes($.id))return;if(Z.items.length>=100)throw Error("Queue is full (100 messages)");if(Z.items.length===0)if($.afterUserMessageId)Z.lastCompletedUserMessageId=$.afterUserMessageId;else delete Z.lastCompletedUserMessageId;Z.items.push({id:$.id,text:$.text,createdAt:Y,status:"queued"});return;case"pause":if(typeof $.paused!=="boolean")throw Error("Invalid queue pause state");if(Z.paused=$.paused,Z.paused){for(let G of Z.items)if(G.status==="claimed")z(G)}return;case"begin-edit":{let G=j();if(G.status==="editing"&&G.owner===J&&G.editToken===$.editToken){G.leaseUntil=Y+30000;return}if(G.status!=="queued")throw Error("Only queued messages can be edited");G.status="editing",G.owner=J,G.editToken=$.editToken,G.leaseUntil=Y+30000;return}case"edit-heartbeat":{U().leaseUntil=Y+30000;return}case"cancel-edit":{z(U());return}case"edit":{if(!X&&$.editToken&&Z.editReceipts?.some((V)=>V.id===$.id&&V.editToken===$.editToken&&V.text===$.text))return;let G=j();if(G.status!=="editing"&&$.editToken&&G.lastEditToken===$.editToken&&G.text===$.text)return;if(G.status==="editing"){U(),G.text=$.text,G.lastEditToken=$.editToken,z(G);return}if(G.status!=="queued")throw Error("Only queued messages can be edited");if($.editToken)throw Error("This edit session has expired or changed; reopen the queued message");G.text=$.text,delete G.lastEditToken;return}case"move":{let G=j();if(G.status!=="queued")throw Error("Only queued messages can be reordered");if(!Number.isInteger($.delta)||!$.delta||Math.abs($.delta)>100)throw Error("Invalid queue move");let V=Z.items.indexOf(G),W=Math.max(0,Math.min(Z.items.length-1,V+$.delta));if(Z.items.slice(Math.min(V,W),Math.max(V,W)+1).some((_)=>_.status!=="queued"))throw Error("Cannot move past a message that is already being sent");Z.items.splice(V,1),Z.items.splice(W,0,G);return}case"remove":{if(!X)return;if(X.status==="editing"){if(X.owner!==J)throw Error("Another tab is editing this queued message")}else if(!["queued","review"].includes(X.status))throw Error("Wait for this message's delivery status before removing it");JZ(Z,X);return}case"claim":{if(Z.lastCompletedUserMessageId&&$.afterUserMessageId!==Z.lastCompletedUserMessageId)return;if(Z.paused||(Z.busyUntil??0)>Y||Z.items.some((V)=>V.status!=="queued"))return;let G=Z.items[0];if(!G)return;return G.status="claimed",G.owner=J,G.leaseUntil=Y+1e4,G}case"steer":{let G=j();if(G.status!=="queued"||Z.items.some((W)=>!["queued","waiting"].includes(W.status)))throw Error("Wait for the active send or edit to finish before sending this message now");Z.items.splice(Z.items.indexOf(G),1);let V=Z.items.reduce((W,_,O)=>_.status==="waiting"?O:W,-1);return Z.items.splice(V+1,0,G),G.status="claimed",G.owner=J,G.leaseUntil=Y+1e4,G.sendNow=!0,G}case"attempt":{let G=D("claimed");if(G.sendNow){for(let V of Z.items.filter((W)=>W.status==="waiting"))JZ(Z,V);delete Z.lastCompletedUserMessageId}else if(Z.paused||(Z.busyUntil??0)>Y)throw Error("ChatGPT became busy or the queue was paused");G.status="sending",G.attemptedAt=Y,G.leaseUntil=Y+30000;return}case"ack":{let G=j();if(G.owner!==J||!["sending","review","waiting"].includes(G.status))throw Error("This message's delivery cannot be acknowledged by this tab");if(typeof $.userMessageId!=="string"||!$.userMessageId||$.userMessageId.length>256)throw Error("Missing confirmed ChatGPT message ID");if(G.status==="waiting"&&G.userMessageId!==$.userMessageId)throw Error("Conflicting ChatGPT message ID");G.status="waiting",G.userMessageId=$.userMessageId,delete G.leaseUntil,delete G.reason;return}case"complete":{if(!X)return;if(X.status!=="waiting")throw Error("Delivery must be confirmed before completing a queued message");if($.userMessageId!==void 0&&$.userMessageId!==X.userMessageId)throw Error("ChatGPT message ID does not match");Z.lastCompletedUserMessageId=X.userMessageId,JZ(Z,X);return}case"release":{if(!X)return;z(D("claimed"));return}case"review":{let G=j();if(G.owner!==J)throw Error("This send attempt belongs to another tab or has changed");if(G.status==="waiting")return;if(!["sending","review"].includes(G.status))throw Error("This message has not been sent yet");G.status="review",G.reason=typeof $.reason==="string"?$.reason.slice(0,1000):"Check whether this message was delivered before retrying.",delete G.leaseUntil;return}case"retry":{let G=j();if(G.status!=="review")throw Error("Only messages needing review can be retried");z(G);return}}}function z(Z){Z.status="queued",delete Z.owner,delete Z.leaseUntil,delete Z.attemptedAt,delete Z.userMessageId,delete Z.reason,delete Z.editToken,delete Z.sendNow}function JZ(Z,$){if($.lastEditToken)Z.editReceipts=[...Z.editReceipts??[],{id:$.id,editToken:$.lastEditToken,text:$.text}].slice(-20);Z.items.splice(Z.items.indexOf($),1),Z.retiredIds=[...Z.retiredIds??[],$.id].slice(-1000)}function Q(){return window.location.hostname==="claude.ai"?"claude":window.location.hostname==="gemini.google.com"?"gemini":"chatgpt"}var wZ={claude:["[data-cds='ChatComposer'] [data-testid='chat-input'][contenteditable='true']","[data-testid='chat-input'][contenteditable='true'][role='textbox']"],gemini:["input-area-v2 rich-textarea .ql-editor[contenteditable='true'][role='textbox']"]},bZ="[data-cds='ChatComposer'], input-area-v2",qZ="[data-testid='assistant-message'] :is([data-perf-reply-text], .standard-markdown)",fZ="model-response message-content .markdown";function GZ(){return Array.from(document.querySelectorAll(Q()==="claude"?qZ:fZ))}function hZ(Z){let $=2166136261;for(let J=0;J<Z.length;J++)$=Math.imul($^Z.charCodeAt(J),16777619);return($>>>0).toString(36)}function XZ(Z,$){if(Q()==="claude"){let X=Z.closest("[data-testid='transcript-row']"),j=X?.getAttribute("data-index"),D=X?.getAttribute("data-perf-row");if(!j||!/^\d+$/.test(j)||!["human","assistant"].includes(D??""))return null;return`claude:${D}:${j}:${hZ($.replace(/\s+/g," ").trim())}`}let J=Z.closest("user-query");if(J){let X=J.querySelector(".query-content[id^='user-query-content-']");if(!X)return null;let j=X.id.match(/^user-query-content-(\d+)$/)?.[1];if(!j){let D=Array.from(document.querySelectorAll("user-query .query-content[id]")),U=D.indexOf(X);for(let G=U-1;G>=0;G--){let V=D[G].id.match(/^user-query-content-(\d+)$/)?.[1];if(V){j=String(Number(V)+U-G);break}}if(!j&&U===0&&D.length===1)j="0"}if(j===void 0)return null;return`gemini:user:user-query-content-${j}:${hZ($.replace(/\s+/g," ").trim())}`}let Y=Z.closest(".conversation-container[id]");if(!Y?.id)return null;return`gemini:assistant:${Y.id}`}function S0(Z,$){let J=Array.from(Z.querySelectorAll(".query-text-line"));if(!J.length)return $(Z).replace(/\u00a0/g," ").trim();return J.map((Y)=>{if(Y.children.length===1&&Y.firstElementChild?.tagName==="BR"&&!Y.textContent)return"";let X=$(Y);return X.length>=2&&X.startsWith(" ")&&X.endsWith(" ")?X.slice(1,-1):X}).join(`
-`).replace(/\u00a0/g," ")}function vZ(Z,$,J){let Y=Q(),X=Y==="claude"?"[data-testid='user-message']":"user-query .query-text",j=Y==="claude"?qZ:fZ,D=J==="user"?X:J==="assistant"?j:`${X}, ${j}`,U=[];for(let G of Array.from(document.querySelectorAll(D))){if(!Z(G))continue;let V=G.matches("[data-testid='user-message'], .query-text")?"user":"assistant",W=G.cloneNode(!0);W.querySelectorAll("button, [role='button'], script, style, .cdk-visually-hidden, .sr-only").forEach((M)=>M.remove());let _=Y==="gemini"&&V==="user"?S0(W,$):$(W).replace(/\u00a0/g," ").trim(),O=XZ(G,_);if(O&&_.trim()&&!U.some((M)=>M.id===O))U.push({id:O,text:_,role:V,element:G})}return U}function xZ(Z){let $=Q()==="claude"?"[data-testid='transcript-row'][data-perf-row-streaming='true'], [data-testid='assistant-message'][data-is-streaming='true'], [aria-label='Currently streaming message']":"model-response [aria-busy='true']";return Array.from(document.querySelectorAll($)).some(Z)}var yZ=new WeakMap;function pZ(Z,$){if(Q()==="gemini"){let X=Z.slice(7),j=[];for(let D of Array.from(document.querySelectorAll("model-response [jslog]"))){let U=D.getAttribute("jslog")?.match(/BardVeMetadataKey:([^;]+)/)?.[1];if(!U)continue;try{let G=JSON.parse(atob(U)),V=Array.isArray(G)&&Array.isArray(G[0])?G[0][1]:null;if(typeof V==="string"&&V.startsWith("c_"))j.push(V.slice(2))}catch{}}return j.length>0&&j.every((D)=>D===X)}let J=$.filter((X)=>X.role==="user").map((X)=>X.id).join("|"),Y=yZ.get(document);if(!Y)Y={key:Z,signature:J,stale:null},yZ.set(document,Y);else if(Y.key!==Z)Y.stale=Y.signature,Y.key=Z;if(Y.stale!==null){if(!J||J===Y.stale)return!1;Y.stale=null}return Y.signature=J,Array.from(document.querySelectorAll("a[aria-current='page'][href]")).some((X)=>{try{return new URL(X.href).pathname===window.location.pathname}catch{return!1}})}function gZ(Z,$){let J=Q(),Y=Z.element.closest(J==="claude"?"[data-testid='transcript-row']":"model-response");if(!Y)return!1;if(J==="claude"&&(Y.getAttribute("data-perf-row-streaming")!=="false"||Z.element.closest("[data-testid='assistant-message']")?.getAttribute("data-is-streaming")!=="false"))return!1;if(J==="gemini"&&(Z.element.getAttribute("aria-busy")!=="false"||!Y.querySelector(".response-footer.complete")))return!1;let X=Array.from(Y.querySelectorAll("button")).filter($).filter((j)=>!Z.element.contains(j)).map((j)=>j.getAttribute("aria-label")?.toLowerCase());return X.includes("copy")&&X.includes("good response")&&X.includes("bad response")}var T0=["[data-composer-input] [data-composer-markdown][contenteditable='true']","[data-composer-markdown][contenteditable='true'][role='textbox']","#prompt-textarea","[data-testid='prompt-textarea']","form[data-type='unified-composer'] textarea","form.group\\/composer textarea","form[data-type='unified-composer'] [contenteditable='true']","form.group\\/composer [contenteditable='true']"],jZ="[data-message-author-role='user'], [data-markdown-text-style='user-message'], [data-chatgpt-search-unit-key$=':user']",d="[data-message-author-role='assistant'], [data-markdown-text-style='assistant-message']",h0=`${jZ}, ${d}`,y0=/^(?:stop|pause)(?:$|[\s…])/i,mZ=/^(?:send|send message|send prompt)$/i,cZ=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,C=null;function F(Z){if(!(Z instanceof HTMLElement)||!Z.isConnected)return!1;for(let $=Z;$;$=$.parentElement){if($.hidden||$.getAttribute("aria-hidden")==="true")return!1;let J=window.getComputedStyle($);if(J.display==="none"||J.visibility==="hidden"||J.visibility==="collapse")return!1}return Z.getClientRects().length>0}function w(){let Z=Q();for(let $ of Z==="chatgpt"?T0:wZ[Z])for(let J of Array.from(document.querySelectorAll($))){if(!F(J)||J.closest("[data-plannotator-queue-root], #plannotator-chatgpt-root"))continue;if(J instanceof HTMLTextAreaElement){if(!J.disabled&&!J.readOnly)return J}else if(J.getAttribute("contenteditable")==="true"&&J.getAttribute("aria-disabled")!=="true")return J}return null}function i(Z=w()){if(!Z)return null;let $=Z.closest(`[data-composer-body], form, [data-composer-surface], section[aria-label*='composer' i], ${bZ}`);if($)return $;let J=Z.parentElement;for(let Y=0;J&&Y<6;Y++,J=J.parentElement){if(J===document.body||J.matches("main, [role='main']"))break;if(Array.from(J.querySelectorAll("button")).some((X)=>lZ(X)||o(X)))return J}return Z.parentElement}function o(Z){return Z.getAttribute("data-testid")==="stop-button"||y0.test((Z.getAttribute("aria-label")||Z.getAttribute("title")||"").trim())}function lZ(Z){if(o(Z))return!1;let $=(Z.getAttribute("aria-label")||Z.getAttribute("title")||"").trim();if($&&!mZ.test($))return!1;return Z.getAttribute("data-testid")==="send-button"||Z.id==="composer-submit-button"||mZ.test($)}function HZ(){let Z=i();if(!Z)return null;for(let $ of Array.from(Z.querySelectorAll("button")))if(F($)&&lZ($)&&!$.disabled&&$.getAttribute("aria-disabled")!=="true")return $;return null}function Z2(){let Z=(Y)=>{if(!F(Y)||Y.disabled||Y.getAttribute("aria-disabled")==="true"||!o(Y))return!1;let X=`${Y.getAttribute("aria-label")??""} ${Y.getAttribute("title")??""}`;return!/\b(?:audio|playback|recording|dictation|voice|music|read[ -]?aloud)\b/i.test(X)&&!Y.closest("[data-testid*='audio'], [data-testid*='voice'], [aria-label*='read aloud' i]")},$=i(),J=$&&Array.from($.querySelectorAll("button")).find(Z);if(J)return J;return Array.from(document.querySelectorAll("button[data-testid='stop-button']")).find(Z)??null}function a(Z){if(Z instanceof HTMLTextAreaElement)return Z.value;return y(Z).replace(/\u00a0/g," ")}function y(Z){let $="";for(let J of Array.from(Z.childNodes)){if(J.nodeType===3){$+=J.textContent??"";continue}if(!(J instanceof HTMLElement))continue;if(J.tagName==="BR"){$+=`
-`;continue}let Y=/^(?:P|DIV|LI|PRE|BLOCKQUOTE|H[1-6])$/.test(J.tagName);if(Y&&$&&!$.endsWith(`
-`))$+=`
-`;if($+=y(J),Y&&J.nextSibling&&!$.endsWith(`
-`))$+=`
-`}return $}function uZ(Z,$){if(!Z.isConnected)return!1;if(Z instanceof HTMLTextAreaElement){if(Z.disabled||Z.readOnly)return!1;let J=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value")?.set;if(!J)return!1;J.call(Z,$),Z.dispatchEvent(new Event("input",{bubbles:!0})),Z.dispatchEvent(new Event("change",{bubbles:!0}))}else{if(Z.getAttribute("contenteditable")!=="true"||Z.getAttribute("aria-disabled")==="true")return!1;Z.focus({preventScroll:!0});let J=window.getSelection();if(!J)return!1;let Y=document.createRange();Y.selectNodeContents(Z),J.removeAllRanges(),J.addRange(Y);let X=!1;try{X=document.execCommand("insertText",!1,$)}catch{}if(!X)Z.textContent=$,Z.dispatchEvent(new InputEvent("input",{bubbles:!0,composed:!0,data:$,inputType:"insertText"}))}return DZ(a(Z))===DZ($)}function dZ(){if(Q()!=="chatgpt")return xZ(F);return Array.from(document.querySelectorAll("main[aria-busy='true'], [role='main'][aria-busy='true'], [data-testid='conversation-loading'], [data-testid='conversation-loading-spinner'], [data-is-streaming='true'], [data-message-author-role='assistant'][aria-busy='true'], [data-markdown-text-style='assistant-message'][aria-busy='true']")).some(F)}function n(){let Z=i();if(Z&&Array.from(Z.querySelectorAll("button")).some(($)=>F($)&&o($)))return!0;if(Array.from(document.querySelectorAll("button[data-testid='stop-button']")).some(F))return!0;if(Array.from(document.querySelectorAll("[data-markdown-animated]")).some(($)=>F($)&&!$.closest("[data-chatgpt-selection-message-id], [data-message-id]")))return!0;return dZ()}function iZ(){let Z=i();if(!Z)return!1;if(Array.from(Z.querySelectorAll("input[type='file']")).some((J)=>(J.files?.length??0)>0))return!0;let $=Z.querySelectorAll("[data-file-id], [data-attachment-id], [data-testid='attachment'], [data-testid*='file-preview'], [data-testid*='attachment-preview'], [data-testid*='image-preview'], [data-test-id*='file-preview'], [data-test-id*='attachment-preview'], uploaded-file, file-preview, img[src^='blob:'], img[src^='data:']");if(Array.from($).some(F))return!0;return Array.from(Z.querySelectorAll("button")).some((J)=>{let Y=`${J.getAttribute("aria-label")??""} ${J.getAttribute("title")??""}`;return F(J)&&/\b(?:remove|delete)\b.*\b(?:attachment|file|image|upload)\b/i.test(Y)})}function oZ(Z){let $=Z.closest("[data-chatgpt-selection-message-id], [data-message-id]")||Z.querySelector("[data-chatgpt-selection-message-id], [data-message-id]"),J=$?.getAttribute("data-chatgpt-selection-message-id")||$?.getAttribute("data-message-id");if(J)return J;return Z.closest("[data-chatgpt-search-message-ids]")?.getAttribute("data-chatgpt-search-message-ids")?.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0]??null}function DZ(Z){return Z.replace(/\r\n/g,`
-`).replace(/\u00a0/g," ").trim()}function aZ(Z){if(Q()!=="chatgpt")return vZ(F,y,Z);let $=[],J=new Set,Y=Z==="user"?jZ:Z==="assistant"?d:h0;for(let X of Array.from(document.querySelectorAll(Y))){if(!F(X))continue;let j=oZ(X);if(!j||J.has(j))continue;let D=X.matches(jZ)?"user":"assistant",G=(X.querySelector(D==="user"?"[data-user-message-bubble='true'], [data-markdown-text-style='user-message'], [data-chatgpt-selection-message-id], [data-message-author-role='user']":"[data-markdown-text-style='assistant-message']")??X).cloneNode(!0);G.querySelectorAll("button, [role='button'], script, style").forEach((W)=>W.remove());let V=DZ(y(G));if(!V)continue;J.add(j),$.push({id:j,text:V,role:D,element:X})}return $}function w0(){return aZ("user").map(({id:Z,text:$})=>({id:Z,text:$}))}function nZ(){return Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]")).filter(F).map((Z)=>Z.getAttribute("data-chatgpt-selection-conversation-id"))}function $2(Z,$){if(!Z.startsWith("chatgpt:")||YZ(window.location.href)!==Z)return!1;if(C&&C.routeKey!==Z)return!1;let J=w0()[0],Y=(D)=>D.replace(/\s+/g," ").trim();if(!J||!cZ.test(J.id)||!$.trim()||Y(J.text)!==Y($))return!1;let X=nZ(),j=X[0];if(!j?.startsWith("local-chatgpt:")||!cZ.test(j.slice(14))||X.some((D)=>D!==j))return!1;if(C&&(C.localId!==j||C.firstUserId!==J.id))return!1;return C={routeKey:Z,localId:j,firstUserId:J.id},!0}function J2(){C=null}function sZ(){let Z=YZ(window.location.href);if(!Z||!w()||Q()==="chatgpt"&&dZ())return null;let $=aZ();if(!$.length)return null;if(Q()!=="chatgpt")return pZ(Z,$)?$:null;if(Z.startsWith("chatgpt:")){let J=Z.slice(8),Y=nZ();if(!Y.length)return null;if(Y.some((X)=>X!==J)){if(!C||C.routeKey!==Z||Y.some((X)=>X!==C.localId)||!$.some((X)=>X.role==="user"&&X.id===C.firstUserId))return null}}return $}function Y2(){return sZ()!==null}function G2(Z){if(n())return!1;let $=sZ();if(!$)return!1;let J=$.findIndex((j)=>j.role==="user"&&(j.id===Z||Q()==="gemini"&&Z===`gemini:user:${j.element.closest(".conversation-container[id]")?.id}`));if(J<0)return!1;let Y;for(let j of $.slice(J+1)){if(j.role==="user")break;Y=j}if(!Y)return!1;if(Q()!=="chatgpt")return gZ(Y,F);let X=Y.element;for(let j=0;X&&j<8;j++,X=X.parentElement){if(X===document.body||X.matches("main, [role='main']"))break;if($.filter((V)=>X.contains(V.element)).some((V)=>V.role==="user"?V.id!==Z:V.id!==Y.id))break;let U=Array.from(X.querySelectorAll("button")).filter(F);if(U.some((V)=>/^(?:copy-turn-action-button|good-response-turn-action-button|bad-response-turn-action-button)$/.test(V.getAttribute("data-testid")??"")))return!0;let G=U.filter((V)=>!V.closest(d)).map((V)=>(V.getAttribute("aria-label")??"").trim().toLowerCase());if(G.includes("rate response")&&(G.includes("copy")||G.includes("copy response")))return!0}return!1}function VZ(){return Q()==="claude"?"Claude":Q()==="gemini"?"Gemini":"ChatGPT"}function UZ(Z){let $=Z instanceof HTMLElement?Z:Z?.parentElement;if(!$)return null;if(Q()!=="chatgpt")return GZ().find((J)=>J===$||J.contains($))??null;return $.closest("[data-message-author-role='assistant']")??$.closest("[data-markdown-text-style='assistant-message']")}function rZ(){if(Q()!=="chatgpt")return GZ();return[...new Set(Array.from(document.querySelectorAll(d)).map(UZ).filter((Z)=>Z!==null))]}function tZ(Z){if(Q()!=="chatgpt")return XZ(Z,y(Z));return oZ(Z)}var c="plannotator-chatgpt-root",eZ="plannotator-chatgpt-page-style",Z0="data-plannotator-message-id",b0="plannotator-chatgpt-notes:v1:",AZ="plannotator-notes",PZ="plannotator-note-active",q0=120,$0=48,WZ=260,t=14,f0=140,v0=4,x0=1400,p0=120,g0=400,m0=700;var RZ=!1,MZ="prod",c0="",H={notes:[],activeNoteId:null,selectionDraft:null,draftEditorOpen:!1,draftText:"",notesMenuOpen:!1,actionFeedback:"idle"},_Z=0,L=null,r=0,b=0,FZ=0,KZ=0,q=null,N=null,P=null,R=[],S=0,J0=0,f=null,BZ=null,s=null,EZ=0;if(window.top===window)l0();function l0(){if(document.getElementById(c))return;d0();let Z=i0();u0(),Y1(Z),G1(Z),document.addEventListener("selectionchange",()=>{if(_Z)return;_Z=window.requestAnimationFrame(()=>{_Z=0,t0(Z)})},!0),window.addEventListener("keydown",($)=>{let J=$.composedPath()[0],Y=J instanceof HTMLElement?J:null,X=(Y instanceof HTMLTextAreaElement||Y instanceof HTMLInputElement)&&Y.getRootNode()===Z.shadow;if(X)$.stopImmediatePropagation();let j=(Y instanceof HTMLTextAreaElement||Y instanceof HTMLInputElement)&&X&&Y.dataset.field==="draft";if($.shiftKey&&($.metaKey||$.ctrlKey)&&!$.altKey){let D=$.key.toLowerCase();if(D==="enter"){$.preventDefault(),CZ(Z);return}if(D==="i"){$.preventDefault(),CZ(Z);return}if(D==="c"){$.preventDefault(),navigator.clipboard.writeText(K0());return}if(D==="k"){$.preventDefault(),I(),NZ(),K(Z);return}}if(j&&$.key==="Enter"&&!$.shiftKey){$.preventDefault(),H.draftText=Y.value,Z1(),K(Z);return}if($.key!=="Escape")return;if(H.notesMenuOpen){H.notesMenuOpen=!1,K(Z);return}if(j){k(),K(Z);return}if(k(),H.activeNoteId)H.activeNoteId=null;K(Z)},!0),document.addEventListener("pointerdown",($)=>{if($.composedPath().includes(Z.host))return;if(!H.activeNoteId&&!H.selectionDraft&&!H.notesMenuOpen)return;k(),H.activeNoteId=null,H.notesMenuOpen=!1,p(Z)},!0),window.addEventListener("resize",()=>p(Z),{passive:!0}),window.addEventListener("scroll",()=>Y0(Z),{passive:!0}),document.addEventListener("scroll",()=>Y0(Z),{passive:!0,capture:!0}),window.addEventListener("wheel",()=>G0(Z),{passive:!0,capture:!0}),window.addEventListener("touchmove",()=>G0(Z),{passive:!0,capture:!0}),document.addEventListener("submit",()=>{QZ(Z,"submit")},!0),document.addEventListener("click",($)=>{if(!X1($.composedPath()))return;QZ(Z,"button")},!0),document.addEventListener("keydown",($)=>{if(!H1($))return;QZ(Z,"enter")},!0),window.addEventListener("pagehide",()=>{l({preserveExistingOnEmpty:!0})},{capture:!0}),K(Z),B0(Z)}function u0(){if(!RZ||!c0)return;let Z=globalThis.chrome?.runtime;if(!Z?.sendMessage)return;let $=Z.sendMessage.bind(Z);A("polling");let J=!1,Y=!1,X=0,j=()=>{let G=w(),V=document.getElementById(c)?.shadowRoot,W=document.getElementById("plannotator-message-queue"),_=W?.shadowRoot;return Boolean(G&&!a(G).trim()&&!n()&&!iZ()&&!H.draftEditorOpen&&!H.draftText.trim()&&!N&&H.actionFeedback!=="loading"&&!V?.querySelector("textarea")&&W?.getAttribute("data-reload-blocked")!=="true"&&!_?.querySelector("textarea, button[data-action='enqueue']:disabled"))},D=(G=420)=>{if(X)return;if(!j()){A("waiting-for-idle");return}A("page-reload-scheduled"),X=window.setTimeout(()=>{if(X=0,!j()){A("waiting-for-idle");return}A("page-reloading"),window.location.reload()},G)};Z.onMessage?.addListener?.((G,V,W)=>{if(G?.type==="plannotator:dev-can-reload"){W?.({ok:!0,safe:j()});return}if(G?.type!=="plannotator:dev-page-reload")return;Y=!0,A("page-reload-message"),D()});let U=async()=>{if(J||X)return;if(Y){D();return}J=!0;try{let G=await $({type:"plannotator:dev-version"});if(!G?.buildId||G.buildId==="booting"||G.buildId===MZ&&G.workerBuildId===MZ)return;if(G.workerBuildId===G.buildId){Y=!0,A(`worker-current:${G.buildId}`),D();return}if(!j()){A("waiting-for-idle");return}A(`build-change:${G.buildId}`);let V=await $({type:"plannotator:dev-reload",buildId:G.buildId});if(V?.ok&&V.scheduled===!1){A("waiting-for-other-tabs");return}if(V?.ok&&V.scheduled===!0)A(`reload-requested:${G.buildId}`)}catch(G){let V=G instanceof Error?G.message:String(G);if(/context invalidated/i.test(V))Y=!0,D()}finally{J=!1}};U(),window.setInterval(()=>{U()},m0)}function d0(){if(document.getElementById(eZ))return;let Z=document.createElement("style");Z.id=eZ,Z.textContent=`
-    ::highlight(${AZ}) {
+(() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __moduleCache = /* @__PURE__ */ new WeakMap;
+  var __toCommonJS = (from) => {
+    var entry = __moduleCache.get(from), desc;
+    if (entry)
+      return entry;
+    entry = __defProp({}, "__esModule", { value: true });
+    if (from && typeof from === "object" || typeof from === "function")
+      __getOwnPropNames(from).map((key) => !__hasOwnProp.call(entry, key) && __defProp(entry, key, {
+        get: () => from[key],
+        enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+      }));
+    __moduleCache.set(from, entry);
+    return entry;
+  };
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, {
+        get: all[name],
+        enumerable: true,
+        configurable: true,
+        set: (newValue) => all[name] = () => newValue
+      });
+  };
+  var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+
+  // src/encrypted-storage.ts
+  var RECORDS = "encrypted-records";
+  var KEYS = "encryption-keys";
+  var KEY_ID = "record-key";
+  var FORMAT = 1;
+  var MAX_CONFLICTS = 128;
+
+  class EncryptedRecordStore {
+    factory;
+    name;
+    legacyTable;
+    connection;
+    constructor(factory, name, legacyTable) {
+      this.factory = factory;
+      this.name = name;
+      this.legacyTable = legacyTable;
+    }
+    async close() {
+      const connection = this.connection;
+      this.connection = undefined;
+      if (connection)
+        (await connection).close();
+    }
+    async apply(key, initial, mutate) {
+      const database = await this.database();
+      const id = await this.lookupId(key);
+      for (let attempt = 0;attempt < MAX_CONFLICTS; attempt++) {
+        const snapshot = await this.snapshot(database, id);
+        const value = snapshot.record ? await this.decrypt(snapshot.record, snapshot.key, key) : initial();
+        const mutation = mutate(value);
+        if (!mutation.changed)
+          return mutation.result;
+        const next = await this.encrypt(id, snapshot.key, mutation.value);
+        if (await this.compareAndSwap(database, id, snapshot, next))
+          return mutation.result;
+      }
+      throw new Error("Storage is busy in another tab. Keep this tab open and retry.");
+    }
+    database() {
+      if (!this.connection) {
+        const opening = this.open().then(async (database) => {
+          try {
+            await this.initializeKey(database);
+            await this.migrate(database);
+            return database;
+          } catch (error) {
+            database.close();
+            throw error;
+          }
+        });
+        this.connection = opening;
+        opening.catch(() => {
+          if (this.connection === opening)
+            this.connection = undefined;
+        });
+      }
+      return this.connection;
+    }
+    open() {
+      return new Promise((resolve, reject) => {
+        const request = this.factory.open(this.name, 2);
+        let failed = false;
+        const fail = (error) => {
+          failed = true;
+          reject(error);
+        };
+        request.onupgradeneeded = () => {
+          const database = request.result;
+          if (!database.objectStoreNames.contains(this.legacyTable))
+            database.createObjectStore(this.legacyTable, { keyPath: "key" });
+          if (!database.objectStoreNames.contains(RECORDS))
+            database.createObjectStore(RECORDS, { keyPath: "id" });
+          if (!database.objectStoreNames.contains(KEYS))
+            database.createObjectStore(KEYS, { keyPath: "id" });
+        };
+        request.onerror = () => fail(request.error ?? new Error("Could not open encrypted storage"));
+        request.onblocked = () => fail(new Error("Storage is busy; close older extension pages and retry"));
+        request.onsuccess = () => {
+          const database = request.result;
+          if (failed) {
+            database.close();
+            return;
+          }
+          database.onversionchange = () => {
+            database.close();
+            this.connection = undefined;
+          };
+          resolve(database);
+        };
+      });
+    }
+    async initializeKey(database) {
+      const existing = await transaction(database, [KEYS, RECORDS], "readonly", (tx, finish) => {
+        const read = tx.objectStore(KEYS).get(KEY_ID);
+        read.onsuccess = () => finish(read.result);
+      });
+      if (existing) {
+        validateKey(existing);
+        return;
+      }
+      const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+      const candidate = { id: KEY_ID, token: crypto.randomUUID(), key };
+      await transaction(database, [KEYS, RECORDS], "readwrite", (tx, finish, fail) => {
+        const read = tx.objectStore(KEYS).get(KEY_ID);
+        read.onsuccess = () => {
+          try {
+            if (read.result) {
+              validateKey(read.result);
+              finish();
+              return;
+            }
+            const count = tx.objectStore(RECORDS).count();
+            count.onsuccess = () => {
+              try {
+                if (count.result !== 0) {
+                  fail(new Error("The encryption key is missing. Existing data has been preserved; do not reset extension storage."));
+                  return;
+                }
+                tx.objectStore(KEYS).add(candidate);
+                finish();
+              } catch (error) {
+                fail(error);
+              }
+            };
+          } catch (error) {
+            fail(error);
+          }
+        };
+      });
+    }
+    async lookupId(key) {
+      const hash = await crypto.subtle.digest("SHA-256", encode(JSON.stringify([this.name, this.legacyTable, key])));
+      return Array.from(new Uint8Array(hash), (value) => value.toString(16).padStart(2, "0")).join("");
+    }
+    authenticatedData(id, token) {
+      return encode(JSON.stringify([FORMAT, this.name, this.legacyTable, id, token]));
+    }
+    async encrypt(id, key, value) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: this.authenticatedData(id, key.token) }, key.key, encode(JSON.stringify(value)));
+      return { id, format: FORMAT, keyToken: key.token, iv, ciphertext };
+    }
+    async decrypt(record, key, expectedKey) {
+      try {
+        if (record.format !== FORMAT || record.keyToken !== key.token || !(record.iv instanceof Uint8Array) || record.iv.byteLength !== 12 || !(record.ciphertext instanceof ArrayBuffer))
+          throw new Error;
+        const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(record.iv), additionalData: this.authenticatedData(record.id, key.token) }, key.key, record.ciphertext);
+        const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plaintext));
+        if (!value || value.key !== expectedKey)
+          throw new Error;
+        return value;
+      } catch {
+        throw new Error("Stored data could not be decrypted or verified. It has been preserved; do not reset extension storage.");
+      }
+    }
+    snapshot(database, id, legacyKey) {
+      const tables = [KEYS, RECORDS, ...legacyKey === undefined ? [] : [this.legacyTable]];
+      return transaction(database, tables, "readonly", (tx, finish, fail) => {
+        const key = tx.objectStore(KEYS).get(KEY_ID);
+        const record = tx.objectStore(RECORDS).get(id);
+        const legacy = legacyKey === undefined ? undefined : tx.objectStore(this.legacyTable).get(legacyKey);
+        const last = legacy ?? record;
+        last.onsuccess = () => {
+          try {
+            validateKey(key.result);
+            finish({ key: key.result, record: record.result, legacy: legacy?.result });
+          } catch (error) {
+            fail(error);
+          }
+        };
+      });
+    }
+    compareAndSwap(database, id, before, next, legacyKey, deleteLegacy = false) {
+      const tables = [KEYS, RECORDS, ...legacyKey === undefined ? [] : [this.legacyTable]];
+      return transaction(database, tables, "readwrite", (tx, finish, fail) => {
+        const key = tx.objectStore(KEYS).get(KEY_ID);
+        const record = tx.objectStore(RECORDS).get(id);
+        const legacy = legacyKey === undefined ? undefined : tx.objectStore(this.legacyTable).get(legacyKey);
+        (legacy ?? record).onsuccess = () => {
+          try {
+            validateKey(key.result);
+            if (key.result.token !== before.key.token)
+              throw new Error("The encryption key changed. Keep this tab open and retry.");
+            if (!sameEnvelope(record.result, before.record) || legacy && JSON.stringify(legacy.result) !== JSON.stringify(before.legacy)) {
+              finish(false);
+              return;
+            }
+            if (next)
+              tx.objectStore(RECORDS).put(next);
+            if (deleteLegacy)
+              tx.objectStore(this.legacyTable).delete(legacyKey);
+            finish(true);
+          } catch (error) {
+            fail(error);
+          }
+        };
+      });
+    }
+    async migrate(database) {
+      for (;; ) {
+        const legacyKey = await transaction(database, [this.legacyTable], "readonly", (tx, finish) => {
+          const read = tx.objectStore(this.legacyTable).openKeyCursor();
+          read.onsuccess = () => finish(read.result?.key);
+        });
+        if (legacyKey === undefined)
+          return;
+        if (typeof legacyKey !== "string")
+          throw new Error("Legacy storage could not be verified. Its original data has been preserved.");
+        const id = await this.lookupId(legacyKey);
+        let finished = false;
+        for (let attempt = 0;attempt < MAX_CONFLICTS; attempt++) {
+          const snapshot = await this.snapshot(database, id, legacyKey);
+          if (snapshot.legacy === undefined) {
+            finished = true;
+            break;
+          }
+          const legacy = snapshot.legacy;
+          if (!legacy || legacy.key !== legacyKey)
+            throw new Error("Legacy storage could not be verified. Its original data has been preserved.");
+          if (snapshot.record) {
+            const verified = await this.decrypt(snapshot.record, snapshot.key, legacyKey);
+            if (JSON.stringify(verified) !== JSON.stringify(legacy))
+              throw new Error("Legacy and encrypted records differ. Both copies have been preserved.");
+            if (await this.compareAndSwap(database, id, snapshot, undefined, legacyKey, true)) {
+              finished = true;
+              break;
+            }
+          } else {
+            const encrypted = await this.encrypt(id, snapshot.key, legacy);
+            await this.compareAndSwap(database, id, snapshot, encrypted, legacyKey);
+          }
+        }
+        if (!finished)
+          throw new Error("Storage migration is busy. Original data is preserved; retry.");
+      }
+    }
+  }
+  function encode(text) {
+    return new TextEncoder().encode(text);
+  }
+  function validateKey(value) {
+    if (!value || value.id !== KEY_ID || typeof value.token !== "string" || !value.token || !value.key || value.key.type !== "secret" || value.key.extractable || value.key.algorithm?.name !== "AES-GCM" || value.key.algorithm.length !== 256 || !Array.isArray(value.key.usages) || !value.key.usages.includes("encrypt") || !value.key.usages.includes("decrypt")) {
+      throw new Error("The encryption key is missing or invalid. Existing data has been preserved; do not reset extension storage.");
+    }
+  }
+  function sameEnvelope(a, b) {
+    if (!a || !b)
+      return a === b;
+    return a.id === b.id && a.format === b.format && a.keyToken === b.keyToken && equalBytes(a.iv, b.iv) && equalBytes(a.ciphertext, b.ciphertext);
+  }
+  function equalBytes(a, b) {
+    const left = new Uint8Array(a instanceof Uint8Array ? a.buffer.slice(a.byteOffset, a.byteOffset + a.byteLength) : a);
+    const right = new Uint8Array(b instanceof Uint8Array ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : b);
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+  function transaction(database, tables, mode, run) {
+    return new Promise((resolve, reject) => {
+      const tx = database.transaction(tables, mode, { durability: "strict" });
+      let result;
+      let finished = false;
+      let failure;
+      const fail = (error) => {
+        failure = error;
+        tx.abort();
+      };
+      tx.oncomplete = () => finished ? resolve(result) : reject(new Error("Storage returned no result"));
+      tx.onabort = () => reject(failure ?? tx.error ?? new Error("Storage transaction failed. Keep this tab open and retry."));
+      tx.onerror = () => {
+        failure ??= tx.error;
+      };
+      try {
+        run(tx, (value) => {
+          result = value;
+          finished = true;
+        }, fail);
+      } catch (error) {
+        fail(error);
+      }
+    });
+  }
+
+  // src/queue-store.ts
+  var QUEUE_MESSAGE_TYPE = "plannotator:queue";
+  var QUEUE_CHANGED_TYPE = "plannotator:queue:changed";
+  var QUEUE_CLAIM_MS = 1e4;
+  var QUEUE_EDIT_MS = 30000;
+  var QUEUE_SEND_TIMEOUT_MS = 30000;
+  var QUEUE_BUSY_MS = 3000;
+  var QUEUE_MAX_TEXT = 200000;
+  var QUEUE_MAX_ITEMS = 100;
+  function getQueueKey(url) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.username || parsed.password)
+        return null;
+      if (parsed.protocol === "https:" && parsed.hostname === "chatgpt.com") {
+        const match = parsed.pathname.match(/(?:^|\/)c\/([A-Za-z0-9_-]+)(?:\/|$)/);
+        return match ? `chatgpt:${match[1]}` : null;
+      }
+      if (parsed.origin === "https://claude.ai") {
+        const match = parsed.pathname.match(/^\/chat\/([A-Za-z0-9_-]{1,128})\/?$/);
+        return match ? `claude:${match[1]}` : null;
+      }
+      if (parsed.origin === "https://gemini.google.com") {
+        const match = parsed.pathname.match(/^\/app\/([A-Za-z0-9_-]{1,128})\/?$/);
+        return match ? `gemini:${match[1]}` : null;
+      }
+      if (parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname)) {
+        return `fixture:${parsed.origin}${parsed.pathname}`;
+      }
+    } catch {}
+    return null;
+  }
+
+  class QueueStore {
+    storage;
+    constructor(factory = indexedDB, name = "plannotator-message-queue-v1") {
+      this.storage = new EncryptedRecordStore(factory, name, "queues");
+    }
+    close() {
+      return this.storage.close();
+    }
+    async apply(request, owner, now = Date.now()) {
+      validateRequest(request);
+      if (!owner || owner.length > 256)
+        throw new Error("Invalid queue client");
+      return this.storage.apply(request.key, () => ({ key: request.key, revision: 0, paused: false, items: [], busyLeases: [] }), (state) => {
+        const before = JSON.stringify(state);
+        recover(state, now);
+        const claimed = mutate(state, request, owner, now);
+        const changed = JSON.stringify(state) !== before;
+        if (changed)
+          state.revision += 1;
+        const {
+          retiredIds: _retiredIds,
+          editReceipts: _editReceipts,
+          busyLeases: _busyLeases,
+          legacyBusyUntil: _legacyBusyUntil,
+          ...visible
+        } = state;
+        const result = {
+          state: structuredClone(visible),
+          changed,
+          ...claimed ? { claimed: structuredClone(claimed) } : {}
+        };
+        return { value: state, result, changed };
+      });
+    }
+  }
+  function validateRequest(request) {
+    if (!request || request.type !== QUEUE_MESSAGE_TYPE || typeof request.key !== "string" || request.key.length > 2048 || !/^(chatgpt|claude|gemini|fixture):/.test(request.key))
+      throw new Error("Invalid queue conversation");
+    if (typeof request.clientId !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.clientId))
+      throw new Error("Invalid queue client");
+    if (!["read", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "anchor", "complete", "release", "review", "retry"].includes(request.action))
+      throw new Error("Unknown queue action");
+    if (request.id !== undefined && (typeof request.id !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.id)))
+      throw new Error("Invalid queued message ID");
+    if (request.editToken !== undefined && (typeof request.editToken !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.editToken)))
+      throw new Error("Invalid queue edit token");
+    if (["begin-edit", "edit-heartbeat", "cancel-edit"].includes(request.action) && !request.editToken)
+      throw new Error("Missing queue edit token");
+    if (request.afterUserMessageId !== undefined && (typeof request.afterUserMessageId !== "string" || !request.afterUserMessageId || request.afterUserMessageId.length > 256))
+      throw new Error("Invalid queue transcript anchor");
+    if (["enqueue", "edit"].includes(request.action) && (typeof request.text !== "string" || !request.text.trim() || request.text.length > QUEUE_MAX_TEXT))
+      throw new Error(`Queued messages must contain 1–${QUEUE_MAX_TEXT.toLocaleString()} characters`);
+  }
+  function recover(state, now) {
+    for (const item of state.items) {
+      if (item.status === "editing" && (item.leaseUntil ?? 0) <= now) {
+        resetToQueued(item);
+        state.paused = true;
+      }
+      if (item.status === "claimed" && (item.leaseUntil ?? 0) <= now)
+        resetToQueued(item);
+      if (item.status === "sending" && (item.attemptedAt ?? 0) + QUEUE_SEND_TIMEOUT_MS <= now) {
+        item.status = "review";
+        item.reason = "Delivery could not be confirmed. Check the chat before retrying to avoid a duplicate.";
+        delete item.leaseUntil;
+      }
+    }
+    refreshBusyUntil(state, now);
+  }
+  function refreshBusyUntil(state, now) {
+    if (!state.busyLeases) {
+      if ((state.busyUntil ?? 0) > now) {
+        state.legacyBusyUntil = Math.max(state.legacyBusyUntil ?? 0, state.busyUntil);
+      }
+      state.busyLeases = [];
+    }
+    state.busyLeases = state.busyLeases.filter((lease) => lease.until > now);
+    if ((state.legacyBusyUntil ?? 0) <= now)
+      delete state.legacyBusyUntil;
+    const until = state.busyLeases.reduce((latest, lease) => Math.max(latest, lease.until), state.legacyBusyUntil ?? 0);
+    if (until > now)
+      state.busyUntil = until;
+    else
+      delete state.busyUntil;
+  }
+  function mutate(state, request, owner, now) {
+    const item = state.items.find((entry) => entry.id === request.id);
+    const requireItem = () => {
+      if (!item)
+        throw new Error("This queued message is no longer available");
+      return item;
+    };
+    const owned = (status) => {
+      const current = requireItem();
+      if (current.status !== status || current.owner !== owner)
+        throw new Error("This queued message is being handled by another tab or has changed");
+      return current;
+    };
+    const ownedEdit = () => {
+      const current = owned("editing");
+      if (current.editToken !== request.editToken)
+        throw new Error("This edit session has changed; reopen the queued message");
+      return current;
+    };
+    switch (request.action) {
+      case "read":
+        return;
+      case "heartbeat": {
+        if (request.busy === true || request.busy === false) {
+          const previous = state.busyLeases.find((lease) => lease.owner === owner);
+          state.busyLeases = state.busyLeases.filter((lease) => lease.owner !== owner);
+          if (request.busy)
+            state.busyLeases.push({ owner, until: Math.max(previous?.until ?? 0, now + QUEUE_BUSY_MS) });
+          refreshBusyUntil(state, now);
+        }
+        return;
+      }
+      case "enqueue":
+        if (!request.id)
+          throw new Error("Missing queued message ID");
+        if (item || state.retiredIds?.includes(request.id))
+          return;
+        if (state.items.length >= QUEUE_MAX_ITEMS)
+          throw new Error(`Queue is full (${QUEUE_MAX_ITEMS} messages)`);
+        if (state.items.length === 0) {
+          if (request.afterUserMessageId)
+            state.lastCompletedUserMessageId = request.afterUserMessageId;
+          else
+            delete state.lastCompletedUserMessageId;
+        }
+        state.items.push({ id: request.id, text: request.text, createdAt: now, status: "queued" });
+        return;
+      case "pause":
+        if (typeof request.paused !== "boolean")
+          throw new Error("Invalid queue pause state");
+        state.paused = request.paused;
+        if (state.paused) {
+          for (const entry of state.items)
+            if (entry.status === "claimed")
+              resetToQueued(entry);
+        }
+        return;
+      case "begin-edit": {
+        const current = requireItem();
+        if (current.status === "editing" && current.owner === owner && current.editToken === request.editToken) {
+          current.leaseUntil = now + QUEUE_EDIT_MS;
+          return;
+        }
+        if (current.status !== "queued")
+          throw new Error("Only queued messages can be edited");
+        current.status = "editing";
+        current.owner = owner;
+        current.editToken = request.editToken;
+        current.leaseUntil = now + QUEUE_EDIT_MS;
+        return;
+      }
+      case "edit-heartbeat": {
+        ownedEdit().leaseUntil = now + QUEUE_EDIT_MS;
+        return;
+      }
+      case "cancel-edit": {
+        resetToQueued(ownedEdit());
+        return;
+      }
+      case "edit": {
+        if (!item && request.editToken && state.editReceipts?.some((receipt) => receipt.id === request.id && receipt.editToken === request.editToken && receipt.text === request.text))
+          return;
+        const current = requireItem();
+        if (current.status !== "editing" && request.editToken && current.lastEditToken === request.editToken && current.text === request.text)
+          return;
+        if (current.status === "editing") {
+          ownedEdit();
+          current.text = request.text;
+          current.lastEditToken = request.editToken;
+          resetToQueued(current);
+          return;
+        }
+        if (current.status !== "queued")
+          throw new Error("Only queued messages can be edited");
+        if (request.editToken)
+          throw new Error("This edit session has expired or changed; reopen the queued message");
+        current.text = request.text;
+        delete current.lastEditToken;
+        return;
+      }
+      case "move": {
+        const current = requireItem();
+        if (current.status !== "queued")
+          throw new Error("Only queued messages can be reordered");
+        if (!Number.isInteger(request.delta) || !request.delta || Math.abs(request.delta) > QUEUE_MAX_ITEMS)
+          throw new Error("Invalid queue move");
+        const index = state.items.indexOf(current);
+        const target = Math.max(0, Math.min(state.items.length - 1, index + request.delta));
+        if (state.items.slice(Math.min(index, target), Math.max(index, target) + 1).some((entry) => entry.status !== "queued"))
+          throw new Error("Cannot move past a message that is already being sent");
+        state.items.splice(index, 1);
+        state.items.splice(target, 0, current);
+        return;
+      }
+      case "remove": {
+        if (!item)
+          return;
+        if (item.status === "editing") {
+          if (item.owner !== owner)
+            throw new Error("Another tab is editing this queued message");
+        } else if (!["queued", "review"].includes(item.status))
+          throw new Error("Wait for this message's delivery status before removing it");
+        retire(state, item);
+        return;
+      }
+      case "claim": {
+        if (state.lastCompletedUserMessageId && request.afterUserMessageId !== state.lastCompletedUserMessageId)
+          return;
+        if (state.paused || (state.busyUntil ?? 0) > now || state.items.some((entry) => entry.status !== "queued"))
+          return;
+        const next = state.items[0];
+        if (!next)
+          return;
+        next.status = "claimed";
+        next.owner = owner;
+        next.leaseUntil = now + QUEUE_CLAIM_MS;
+        return next;
+      }
+      case "steer": {
+        const current = requireItem();
+        if (current.status !== "queued" || state.items.some((entry) => !["queued", "waiting"].includes(entry.status))) {
+          throw new Error("Wait for the active send or edit to finish before sending this message now");
+        }
+        state.items.splice(state.items.indexOf(current), 1);
+        const lastWaiting = state.items.reduce((index, entry, next) => entry.status === "waiting" ? next : index, -1);
+        state.items.splice(lastWaiting + 1, 0, current);
+        current.status = "claimed";
+        current.owner = owner;
+        current.leaseUntil = now + QUEUE_CLAIM_MS;
+        current.sendNow = true;
+        return current;
+      }
+      case "attempt": {
+        const current = owned("claimed");
+        if (current.sendNow) {
+          for (const previous of state.items.filter((entry) => entry.status === "waiting"))
+            retire(state, previous);
+          delete state.lastCompletedUserMessageId;
+        } else if (state.paused || (state.busyUntil ?? 0) > now)
+          throw new Error("ChatGPT became busy or the queue was paused");
+        current.status = "sending";
+        current.attemptedAt = now;
+        current.leaseUntil = now + QUEUE_SEND_TIMEOUT_MS;
+        return;
+      }
+      case "ack": {
+        const current = requireItem();
+        if (current.owner !== owner || !["sending", "review", "waiting"].includes(current.status))
+          throw new Error("This message's delivery cannot be acknowledged by this tab");
+        if (typeof request.userMessageId !== "string" || !request.userMessageId || request.userMessageId.length > 256)
+          throw new Error("Missing confirmed ChatGPT message ID");
+        if (current.status === "waiting" && current.userMessageId !== request.userMessageId)
+          throw new Error("Conflicting ChatGPT message ID");
+        current.status = "waiting";
+        current.userMessageId = request.userMessageId;
+        delete current.leaseUntil;
+        delete current.reason;
+        return;
+      }
+      case "anchor": {
+        if (!request.key.startsWith("gemini:") || typeof request.userMessageId !== "string" || !/^gemini:user:user-query-content-\d+:[a-z0-9]+$/.test(request.userMessageId ?? "") || !/^gemini:user:[0-9a-f]{16}$/i.test(request.afterUserMessageId ?? ""))
+          throw new Error("Invalid Gemini transcript anchor promotion");
+        if (request.id) {
+          if (item?.status === "waiting" && item.userMessageId === request.userMessageId)
+            item.userMessageId = request.afterUserMessageId;
+        } else if (state.lastCompletedUserMessageId === request.userMessageId) {
+          state.lastCompletedUserMessageId = request.afterUserMessageId;
+        }
+        return;
+      }
+      case "complete": {
+        if (!item)
+          return;
+        if (item.status !== "waiting")
+          throw new Error("Delivery must be confirmed before completing a queued message");
+        if (request.userMessageId !== undefined && request.userMessageId !== item.userMessageId)
+          throw new Error("ChatGPT message ID does not match");
+        state.lastCompletedUserMessageId = item.userMessageId;
+        retire(state, item);
+        return;
+      }
+      case "release": {
+        if (!item)
+          return;
+        resetToQueued(owned("claimed"));
+        return;
+      }
+      case "review": {
+        const current = requireItem();
+        if (current.owner !== owner)
+          throw new Error("This send attempt belongs to another tab or has changed");
+        if (current.status === "waiting")
+          return;
+        if (!["sending", "review"].includes(current.status))
+          throw new Error("This message has not been sent yet");
+        current.status = "review";
+        current.reason = typeof request.reason === "string" ? request.reason.slice(0, 1000) : "Check whether this message was delivered before retrying.";
+        delete current.leaseUntil;
+        return;
+      }
+      case "retry": {
+        const current = requireItem();
+        if (current.status !== "review")
+          throw new Error("Only messages needing review can be retried");
+        resetToQueued(current);
+        return;
+      }
+    }
+  }
+  function resetToQueued(item) {
+    item.status = "queued";
+    delete item.owner;
+    delete item.leaseUntil;
+    delete item.attemptedAt;
+    delete item.userMessageId;
+    delete item.reason;
+    delete item.editToken;
+    delete item.sendNow;
+  }
+  function retire(state, item) {
+    if (item.lastEditToken) {
+      state.editReceipts = [
+        ...state.editReceipts ?? [],
+        { id: item.id, editToken: item.lastEditToken, text: item.text }
+      ].slice(-20);
+    }
+    state.items.splice(state.items.indexOf(item), 1);
+    state.retiredIds = [...state.retiredIds ?? [], item.id].slice(-1000);
+  }
+
+  // src/provider-dom.ts
+  function currentProvider() {
+    return window.location.hostname === "claude.ai" ? "claude" : window.location.hostname === "gemini.google.com" ? "gemini" : "chatgpt";
+  }
+  var providerComposerSelectors = {
+    claude: ["[data-cds='ChatComposer'] [data-testid='chat-input'][contenteditable='true']", "[data-testid='chat-input'][contenteditable='true'][role='textbox']"],
+    gemini: ["input-area-v2 rich-textarea .ql-editor[contenteditable='true'][role='textbox']"]
+  };
+  var providerScopeSelector = "[data-cds='ChatComposer'], input-area-v2";
+  var claudeBody = "[data-testid='assistant-message'] :is([data-perf-reply-text], .standard-markdown)";
+  var geminiBody = "model-response message-content .markdown";
+  function providerAssistantElements() {
+    return Array.from(document.querySelectorAll(currentProvider() === "claude" ? claudeBody : geminiBody));
+  }
+  function hash(text) {
+    let value = 2166136261;
+    for (let i = 0;i < text.length; i++)
+      value = Math.imul(value ^ text.charCodeAt(i), 16777619);
+    return (value >>> 0).toString(36);
+  }
+  function providerMessageId(element, text) {
+    if (currentProvider() === "claude") {
+      const row = element.closest("[data-testid='transcript-row']");
+      const index = row?.getAttribute("data-index");
+      const role = row?.getAttribute("data-perf-row");
+      if (!index || !/^\d+$/.test(index) || !["human", "assistant"].includes(role ?? ""))
+        return null;
+      return `claude:${role}:${index}:${hash(text.replace(/\s+/g, " ").trim())}`;
+    }
+    const user = element.closest("user-query");
+    if (user) {
+      const prompt = user.querySelector(".query-content[id^='user-query-content-']");
+      if (!prompt)
+        return null;
+      let index = prompt.id.match(/^user-query-content-(\d+)$/)?.[1];
+      if (!index) {
+        const prompts = Array.from(document.querySelectorAll("user-query .query-content[id]"));
+        const position = prompts.indexOf(prompt);
+        for (let previous = position - 1;previous >= 0; previous--) {
+          const priorIndex = prompts[previous].id.match(/^user-query-content-(\d+)$/)?.[1];
+          if (priorIndex) {
+            index = String(Number(priorIndex) + position - previous);
+            break;
+          }
+        }
+        if (!index && position === 0 && prompts.length === 1)
+          index = "0";
+      }
+      if (index === undefined)
+        return null;
+      return `gemini:user:user-query-content-${index}:${hash(text.replace(/\s+/g, " ").trim())}`;
+    }
+    const turn = element.closest(".conversation-container[id]");
+    if (!turn?.id)
+      return null;
+    return `gemini:assistant:${turn.id}`;
+  }
+  function geminiUserText(element, read) {
+    const lines = Array.from(element.querySelectorAll(".query-text-line"));
+    if (!lines.length)
+      return read(element).replace(/\u00a0/g, " ").trim();
+    return lines.map((line) => {
+      if (line.children.length === 1 && line.firstElementChild?.tagName === "BR" && !line.textContent)
+        return "";
+      const text = read(line);
+      return text.length >= 2 && text.startsWith(" ") && text.endsWith(" ") ? text.slice(1, -1) : text;
+    }).join(`
+`).replace(/\u00a0/g, " ");
+  }
+  function providerMessages(visible, read, onlyRole) {
+    const provider = currentProvider();
+    const userSelector = provider === "claude" ? "[data-testid='user-message']" : "user-query .query-text";
+    const assistantSelector = provider === "claude" ? claudeBody : geminiBody;
+    const selector = onlyRole === "user" ? userSelector : onlyRole === "assistant" ? assistantSelector : `${userSelector}, ${assistantSelector}`;
+    const messages = [];
+    for (const element of Array.from(document.querySelectorAll(selector))) {
+      if (!visible(element))
+        continue;
+      const role = element.matches("[data-testid='user-message'], .query-text") ? "user" : "assistant";
+      const copy = element.cloneNode(true);
+      copy.querySelectorAll("button, [role='button'], script, style, .cdk-visually-hidden, .sr-only").forEach((node) => node.remove());
+      const text = provider === "gemini" && role === "user" ? geminiUserText(copy, read) : read(copy).replace(/\u00a0/g, " ").trim();
+      const id = providerMessageId(element, text);
+      if (id && text.trim() && !messages.some((message) => message.id === id))
+        messages.push({ id, text, role, element });
+    }
+    return messages;
+  }
+  function providerLoading(visible) {
+    const selectors = currentProvider() === "claude" ? "[data-testid='transcript-row'][data-perf-row-streaming='true'], [data-testid='assistant-message'][data-is-streaming='true'], [aria-label='Currently streaming message']" : "model-response [aria-busy='true']";
+    return Array.from(document.querySelectorAll(selectors)).some(visible);
+  }
+  var routeStates = new WeakMap;
+  function providerConversationReady(key, messages) {
+    if (currentProvider() === "gemini") {
+      const id = key.slice("gemini:".length);
+      const ids = [];
+      for (const node of Array.from(document.querySelectorAll("model-response [jslog]"))) {
+        const encoded = node.getAttribute("jslog")?.match(/BardVeMetadataKey:([^;]+)/)?.[1];
+        if (!encoded)
+          continue;
+        try {
+          const value = JSON.parse(atob(encoded));
+          const conversation = Array.isArray(value) && Array.isArray(value[0]) ? value[0][1] : null;
+          if (typeof conversation === "string" && conversation.startsWith("c_"))
+            ids.push(conversation.slice(2));
+        } catch {}
+      }
+      return ids.length > 0 && ids.every((value) => value === id);
+    }
+    const signature = messages.filter((message) => message.role === "user").map((message) => message.id).join("|");
+    let state = routeStates.get(document);
+    if (!state) {
+      state = { key, signature, stale: null };
+      routeStates.set(document, state);
+    } else if (state.key !== key) {
+      state.stale = state.signature;
+      state.key = key;
+    }
+    if (state.stale !== null) {
+      if (!signature || signature === state.stale)
+        return false;
+      state.stale = null;
+    }
+    state.signature = signature;
+    return Array.from(document.querySelectorAll("a[aria-current='page'][href]")).some((link) => {
+      try {
+        return new URL(link.href).pathname === window.location.pathname;
+      } catch {
+        return false;
+      }
+    });
+  }
+  function providerCompletion(assistant, visible) {
+    const provider = currentProvider();
+    const container = assistant.element.closest(provider === "claude" ? "[data-testid='transcript-row']" : "model-response");
+    if (!container)
+      return false;
+    if (provider === "claude" && (container.getAttribute("data-perf-row-streaming") !== "false" || assistant.element.closest("[data-testid='assistant-message']")?.getAttribute("data-is-streaming") !== "false"))
+      return false;
+    if (provider === "gemini" && (assistant.element.getAttribute("aria-busy") !== "false" || !container.querySelector(".response-footer.complete")))
+      return false;
+    const labels = Array.from(container.querySelectorAll("button")).filter(visible).filter((button) => !assistant.element.contains(button)).map((button) => button.getAttribute("aria-label")?.toLowerCase());
+    return labels.includes("copy") && labels.includes("good response") && labels.includes("bad response");
+  }
+
+  // src/chatgpt-dom.ts
+  var COMPOSER_SELECTORS = [
+    "[data-composer-input] [data-composer-markdown][contenteditable='true']",
+    "[data-composer-markdown][contenteditable='true'][role='textbox']",
+    "#prompt-textarea",
+    "[data-testid='prompt-textarea']",
+    "form[data-type='unified-composer'] textarea",
+    "form.group\\/composer textarea",
+    "form[data-type='unified-composer'] [contenteditable='true']",
+    "form.group\\/composer [contenteditable='true']"
+  ];
+  var USER_SELECTOR = "[data-message-author-role='user'], [data-markdown-text-style='user-message'], [data-chatgpt-search-unit-key$=':user']";
+  var ASSISTANT_SELECTOR = "[data-message-author-role='assistant'], [data-markdown-text-style='assistant-message']";
+  var MESSAGE_SELECTOR = `${USER_SELECTOR}, ${ASSISTANT_SELECTOR}`;
+  var STOP_LABEL = /^(?:stop|pause)(?:$|[\s…])/i;
+  var SEND_LABEL = /^(?:send|send message|send prompt)$/i;
+  var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  var conversationAlias = null;
+  function isVisible(element) {
+    if (!(element instanceof HTMLElement) || !element.isConnected)
+      return false;
+    for (let node = element;node; node = node.parentElement) {
+      if (node.hidden || node.getAttribute("aria-hidden") === "true")
+        return false;
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse")
+        return false;
+    }
+    return element.getClientRects().length > 0;
+  }
+  function findQueueComposer() {
+    const provider = currentProvider();
+    for (const selector of provider === "chatgpt" ? COMPOSER_SELECTORS : providerComposerSelectors[provider]) {
+      for (const element of Array.from(document.querySelectorAll(selector))) {
+        if (!isVisible(element) || element.closest("[data-plannotator-queue-root], #plannotator-chatgpt-root"))
+          continue;
+        if (element instanceof HTMLTextAreaElement) {
+          if (!element.disabled && !element.readOnly)
+            return element;
+        } else if (element.getAttribute("contenteditable") === "true" && element.getAttribute("aria-disabled") !== "true") {
+          return element;
+        }
+      }
+    }
+    return null;
+  }
+  function composerScope(composer = findQueueComposer()) {
+    if (!composer)
+      return null;
+    const known = composer.closest(`[data-composer-body], form, [data-composer-surface], section[aria-label*='composer' i], ${providerScopeSelector}`);
+    if (known)
+      return known;
+    let parent = composer.parentElement;
+    for (let depth = 0;parent && depth < 6; depth++, parent = parent.parentElement) {
+      if (parent === document.body || parent.matches("main, [role='main']"))
+        break;
+      if (Array.from(parent.querySelectorAll("button")).some((button) => isSendControl(button) || isStopControl(button)))
+        return parent;
+    }
+    return composer.parentElement;
+  }
+  function isStopControl(button) {
+    return button.getAttribute("data-testid") === "stop-button" || STOP_LABEL.test((button.getAttribute("aria-label") || button.getAttribute("title") || "").trim());
+  }
+  function isSendControl(button) {
+    if (isStopControl(button))
+      return false;
+    const label = (button.getAttribute("aria-label") || button.getAttribute("title") || "").trim();
+    if (label && !SEND_LABEL.test(label))
+      return false;
+    return button.getAttribute("data-testid") === "send-button" || button.id === "composer-submit-button" || SEND_LABEL.test(label);
+  }
+  function findQueueSendButton() {
+    const scope = composerScope();
+    if (!scope)
+      return null;
+    for (const button of Array.from(scope.querySelectorAll("button"))) {
+      if (isVisible(button) && isSendControl(button) && !button.disabled && button.getAttribute("aria-disabled") !== "true")
+        return button;
+    }
+    return null;
+  }
+  function findQueueStopButton() {
+    const enabledGenerationStop = (button) => {
+      if (!isVisible(button) || button.disabled || button.getAttribute("aria-disabled") === "true" || !isStopControl(button))
+        return false;
+      const label = `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""}`;
+      return !/\b(?:audio|playback|recording|dictation|voice|music|read[ -]?aloud)\b/i.test(label) && !button.closest("[data-testid*='audio'], [data-testid*='voice'], [aria-label*='read aloud' i]");
+    };
+    const scope = composerScope();
+    const local = scope && Array.from(scope.querySelectorAll("button")).find(enabledGenerationStop);
+    if (local)
+      return local;
+    return Array.from(document.querySelectorAll("button[data-testid='stop-button']")).find(enabledGenerationStop) ?? null;
+  }
+  function readComposer(element) {
+    if (element instanceof HTMLTextAreaElement)
+      return element.value;
+    return plainText(element).replace(/\u00a0/g, " ");
+  }
+  function plainText(element) {
+    let text = "";
+    for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType === 3) {
+        text += child.textContent ?? "";
+        continue;
+      }
+      if (!(child instanceof HTMLElement))
+        continue;
+      if (child.tagName === "BR") {
+        text += `
+`;
+        continue;
+      }
+      const block = /^(?:P|DIV|LI|PRE|BLOCKQUOTE|H[1-6])$/.test(child.tagName);
+      if (block && text && !text.endsWith(`
+`))
+        text += `
+`;
+      text += plainText(child);
+      if (block && child.nextSibling && !text.endsWith(`
+`))
+        text += `
+`;
+    }
+    return text;
+  }
+  function writeComposer(element, text) {
+    if (!element.isConnected)
+      return false;
+    if (element instanceof HTMLTextAreaElement) {
+      if (element.disabled || element.readOnly)
+        return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      if (!setter)
+        return false;
+      setter.call(element, text);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      if (element.getAttribute("contenteditable") !== "true" || element.getAttribute("aria-disabled") === "true")
+        return false;
+      element.focus({ preventScroll: true });
+      const selection = window.getSelection();
+      if (!selection)
+        return false;
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      let inserted = false;
+      try {
+        inserted = document.execCommand("insertText", false, text);
+      } catch {}
+      if (!inserted) {
+        element.textContent = text;
+        element.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          data: text,
+          inputType: "insertText"
+        }));
+      }
+    }
+    return normalizeText(readComposer(element)) === normalizeText(text);
+  }
+  function hasLoadingState() {
+    if (currentProvider() !== "chatgpt")
+      return providerLoading(isVisible);
+    if (Array.from(document.querySelectorAll("main [role='status'][aria-busy='true'], [role='main'] [role='status'][aria-busy='true']")).some((status) => isVisible(status) && !status.closest("[data-composer-body], form, [data-composer-surface]")))
+      return true;
+    return Array.from(document.querySelectorAll("main[aria-busy='true'], [role='main'][aria-busy='true'], [data-testid='conversation-loading'], [data-testid='conversation-loading-spinner'], [data-is-streaming='true'], [data-message-author-role='assistant'][aria-busy='true'], [data-markdown-text-style='assistant-message'][aria-busy='true']")).some(isVisible);
+  }
+  function isChatBusy() {
+    const scope = composerScope();
+    if (scope && Array.from(scope.querySelectorAll("button")).some((button) => isVisible(button) && isStopControl(button)))
+      return true;
+    if (Array.from(document.querySelectorAll("button[data-testid='stop-button']")).some(isVisible))
+      return true;
+    if (Array.from(document.querySelectorAll("[data-markdown-animated]")).some((body) => isVisible(body) && !body.closest("[data-chatgpt-selection-message-id], [data-message-id]")))
+      return true;
+    return hasLoadingState();
+  }
+  function hasComposerAttachments() {
+    const scope = composerScope();
+    if (!scope)
+      return false;
+    if (Array.from(scope.querySelectorAll("input[type='file']")).some((input) => (input.files?.length ?? 0) > 0))
+      return true;
+    const previews = scope.querySelectorAll("[data-file-id], [data-attachment-id], [data-testid='attachment'], [data-testid*='file-preview'], [data-testid*='attachment-preview'], [data-testid*='image-preview'], [data-test-id*='file-preview'], [data-test-id*='attachment-preview'], uploaded-file, file-preview, img[src^='blob:'], img[src^='data:']");
+    if (Array.from(previews).some(isVisible))
+      return true;
+    return Array.from(scope.querySelectorAll("button")).some((button) => {
+      const label = `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""}`;
+      return isVisible(button) && /\b(?:remove|delete)\b.*\b(?:attachment|file|image|upload)\b/i.test(label);
+    });
+  }
+  function messageId(element) {
+    const wrapper = element.closest("[data-chatgpt-selection-message-id], [data-message-id]") || element.querySelector("[data-chatgpt-selection-message-id], [data-message-id]");
+    const stableId = wrapper?.getAttribute("data-chatgpt-selection-message-id") || wrapper?.getAttribute("data-message-id");
+    if (stableId)
+      return stableId;
+    const unit = element.closest("[data-chatgpt-search-message-ids]");
+    return unit?.getAttribute("data-chatgpt-search-message-ids")?.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? null;
+  }
+  function normalizeText(text) {
+    return text.replace(/\r\n/g, `
+`).replace(/\u00a0/g, " ").trim();
+  }
+  function visibleMessages(roleFilter) {
+    if (currentProvider() !== "chatgpt")
+      return providerMessages(isVisible, plainText, roleFilter);
+    const records = [];
+    const seen = new Set;
+    const selector = roleFilter === "user" ? USER_SELECTOR : roleFilter === "assistant" ? ASSISTANT_SELECTOR : MESSAGE_SELECTOR;
+    for (const element of Array.from(document.querySelectorAll(selector))) {
+      if (!isVisible(element))
+        continue;
+      const id = messageId(element);
+      if (!id || seen.has(id))
+        continue;
+      const role = element.matches(USER_SELECTOR) ? "user" : "assistant";
+      const body = element.querySelector(role === "user" ? "[data-user-message-bubble='true'], [data-markdown-text-style='user-message'], [data-chatgpt-selection-message-id], [data-message-author-role='user']" : "[data-markdown-text-style='assistant-message']") ?? element;
+      const copy = body.cloneNode(true);
+      copy.querySelectorAll("button, [role='button'], script, style").forEach((node) => node.remove());
+      const text = normalizeText(plainText(copy));
+      if (!text)
+        continue;
+      seen.add(id);
+      records.push({ id, text, role, element });
+    }
+    return records;
+  }
+  function getVisibleUserMessages() {
+    return visibleMessages("user").map(({ id, text }) => ({ id, text }));
+  }
+  function visibleConversationIds() {
+    return Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]")).filter(isVisible).map((marker) => marker.getAttribute("data-chatgpt-selection-conversation-id"));
+  }
+  function registerNewConversationAlias(routeKey, firstMessageText) {
+    if (!routeKey.startsWith("chatgpt:") || getQueueKey(window.location.href) !== routeKey)
+      return false;
+    if (conversationAlias && conversationAlias.routeKey !== routeKey)
+      return false;
+    const firstUser = getVisibleUserMessages()[0];
+    const collapse = (text) => text.replace(/\s+/g, " ").trim();
+    if (!firstUser || !UUID_PATTERN.test(firstUser.id) || !firstMessageText.trim() || collapse(firstUser.text) !== collapse(firstMessageText))
+      return false;
+    const markerIds = visibleConversationIds();
+    const localId = markerIds[0];
+    if (!localId?.startsWith("local-chatgpt:") || !UUID_PATTERN.test(localId.slice("local-chatgpt:".length)) || markerIds.some((id) => id !== localId))
+      return false;
+    if (conversationAlias && (conversationAlias.localId !== localId || conversationAlias.firstUserId !== firstUser.id))
+      return false;
+    conversationAlias = { routeKey, localId, firstUserId: firstUser.id };
+    return true;
+  }
+  function clearConversationAlias() {
+    conversationAlias = null;
+  }
+  function currentConversationMessages() {
+    const key = getQueueKey(window.location.href);
+    if (!key || !findQueueComposer() || currentProvider() === "chatgpt" && hasLoadingState())
+      return null;
+    const messages = visibleMessages();
+    if (!messages.length)
+      return null;
+    if (currentProvider() !== "chatgpt")
+      return providerConversationReady(key, messages) ? messages : null;
+    if (key.startsWith("chatgpt:")) {
+      const id = key.slice("chatgpt:".length);
+      const markerIds = visibleConversationIds();
+      if (!markerIds.length)
+        return null;
+      if (markerIds.some((markerId) => markerId !== id)) {
+        if (!conversationAlias || conversationAlias.routeKey !== key || markerIds.some((markerId) => markerId !== conversationAlias.localId) || !messages.some((message) => message.role === "user" && message.id === conversationAlias.firstUserId))
+          return null;
+      }
+    }
+    return messages;
+  }
+  function isCurrentConversationReady() {
+    return currentConversationMessages() !== null;
+  }
+  function getStableUserMessageAnchor(userId) {
+    if (currentProvider() !== "gemini" || !/^gemini:user:user-query-content-\d+:[a-z0-9]+$/.test(userId))
+      return null;
+    const messages = currentConversationMessages();
+    if (!messages)
+      return null;
+    const user = messages.find((message) => message.role === "user" && message.id === userId);
+    const turn = user?.element.closest(".conversation-container[id]");
+    return turn && /^[0-9a-f]{16}$/i.test(turn.id) ? `gemini:user:${turn.id}` : null;
+  }
+  function getAssistantCompletionAfter(userId) {
+    if (isChatBusy())
+      return false;
+    const messages = currentConversationMessages();
+    if (!messages)
+      return false;
+    const userIndex = messages.findIndex((message) => message.role === "user" && (message.id === userId || currentProvider() === "gemini" && userId === `gemini:user:${message.element.closest(".conversation-container[id]")?.id}`));
+    if (userIndex < 0)
+      return false;
+    let assistant;
+    for (const message of messages.slice(userIndex + 1)) {
+      if (message.role === "user")
+        break;
+      assistant = message;
+    }
+    if (!assistant)
+      return false;
+    if (currentProvider() !== "chatgpt")
+      return providerCompletion(assistant, isVisible);
+    let container = assistant.element;
+    for (let depth = 0;container && depth < 8; depth++, container = container.parentElement) {
+      if (container === document.body || container.matches("main, [role='main']"))
+        break;
+      const containedMessages = messages.filter((message) => container.contains(message.element));
+      if (containedMessages.some((message) => message.role === "user" ? message.id !== userId : message.id !== assistant.id))
+        break;
+      const controls = Array.from(container.querySelectorAll("button")).filter(isVisible);
+      if (controls.some((button) => /^(?:copy-turn-action-button|good-response-turn-action-button|bad-response-turn-action-button)$/.test(button.getAttribute("data-testid") ?? "")))
+        return true;
+      const labels = controls.filter((button) => !button.closest(ASSISTANT_SELECTOR)).map((button) => (button.getAttribute("aria-label") ?? "").trim().toLowerCase());
+      if (labels.includes("rate response") && (labels.includes("copy") || labels.includes("copy response")))
+        return true;
+    }
+    return false;
+  }
+  function getProviderName() {
+    return currentProvider() === "claude" ? "Claude" : currentProvider() === "gemini" ? "Gemini" : "ChatGPT";
+  }
+  function findAssistantMessageElement(node) {
+    const element = node instanceof HTMLElement ? node : node?.parentElement;
+    if (!element)
+      return null;
+    if (currentProvider() !== "chatgpt")
+      return providerAssistantElements().find((body) => body === element || body.contains(element)) ?? null;
+    return element.closest("[data-message-author-role='assistant']") ?? element.closest("[data-markdown-text-style='assistant-message']");
+  }
+  function getAssistantMessageElements() {
+    if (currentProvider() !== "chatgpt")
+      return providerAssistantElements();
+    return [...new Set(Array.from(document.querySelectorAll(ASSISTANT_SELECTOR)).map(findAssistantMessageElement).filter((element) => element !== null))];
+  }
+  function getAssistantMessageId(element) {
+    if (currentProvider() !== "chatgpt")
+      return providerMessageId(element, plainText(element));
+    return messageId(element);
+  }
+
+  // node_modules/lucide/dist/esm/icons/arrow-right.mjs
+  var ArrowRight = [
+    ["path", { d: "M5 12h14" }],
+    ["path", { d: "m12 5 7 7-7 7" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/arrow-up.mjs
+  var ArrowUp = [
+    ["path", { d: "m5 12 7-7 7 7" }],
+    ["path", { d: "M12 19V5" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/check.mjs
+  var Check = [["path", { d: "M20 6 9 17l-5-5" }]];
+
+  // node_modules/lucide/dist/esm/icons/chevron-down.mjs
+  var ChevronDown = [["path", { d: "m6 9 6 6 6-6" }]];
+
+  // node_modules/lucide/dist/esm/icons/chevron-right.mjs
+  var ChevronRight = [["path", { d: "m9 18 6-6-6-6" }]];
+
+  // node_modules/lucide/dist/esm/icons/grip-vertical.mjs
+  var GripVertical = [
+    ["circle", { cx: "9", cy: "12", r: "1" }],
+    ["circle", { cx: "9", cy: "5", r: "1" }],
+    ["circle", { cx: "9", cy: "19", r: "1" }],
+    ["circle", { cx: "15", cy: "12", r: "1" }],
+    ["circle", { cx: "15", cy: "5", r: "1" }],
+    ["circle", { cx: "15", cy: "19", r: "1" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/loader-circle.mjs
+  var LoaderCircle = [["path", { d: "M21 12a9 9 0 1 1-6.219-8.56" }]];
+
+  // node_modules/lucide/dist/esm/icons/pause.mjs
+  var Pause = [
+    ["rect", { x: "14", y: "3", width: "5", height: "18", rx: "1" }],
+    ["rect", { x: "5", y: "3", width: "5", height: "18", rx: "1" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/pencil.mjs
+  var Pencil = [
+    [
+      "path",
+      {
+        d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"
+      }
+    ],
+    ["path", { d: "m15 5 4 4" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/play.mjs
+  var Play = [
+    [
+      "path",
+      { d: "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" }
+    ]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/plus.mjs
+  var Plus = [
+    ["path", { d: "M5 12h14" }],
+    ["path", { d: "M12 5v14" }]
+  ];
+
+  // node_modules/lucide/dist/esm/icons/trash.mjs
+  var Trash = [
+    ["path", { d: "M10 11v6" }],
+    ["path", { d: "M14 11v6" }],
+    ["path", { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" }],
+    ["path", { d: "M3 6h18" }],
+    ["path", { d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }]
+  ];
+  // src/icons.ts
+  var icons = {
+    "arrow-right": ArrowRight,
+    send: ArrowUp,
+    check: Check,
+    "chevron-down": ChevronDown,
+    "chevron-right": ChevronRight,
+    grip: GripVertical,
+    loader: LoaderCircle,
+    pause: Pause,
+    edit: Pencil,
+    play: Play,
+    plus: Plus,
+    trash: Trash
+  };
+  var escapeAttribute = (value) => String(value).replace(/[&"<>]/g, (char) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" })[char]);
+  function icon(name, size = 16, className = "") {
+    const children = icons[name].map(([tag, attributes]) => `<${tag} ${Object.entries(attributes).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}="${escapeAttribute(value)}"`).join(" ")}></${tag}>`).join("");
+    return `<svg class="icon icon-${name}${className ? ` ${escapeAttribute(className)}` : ""}" xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${children}</svg>`;
+  }
+
+  // src/annotation-store.ts
+  var ANNOTATION_MESSAGE_TYPE = "plannotator:annotations";
+  var ANNOTATION_CHANGED_TYPE = "plannotator:annotations:changed";
+  var ANNOTATION_MAX_NOTES = 500;
+  var ANNOTATION_MAX_TEXT = 200000;
+  var ANNOTATION_MAX_TOMBSTONES = 2000;
+  var MAX_DOCUMENT_TEXT = 8000000;
+  function getAnnotationKey(url) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname === "chatgpt.com" && parsed.origin !== "https://chatgpt.com")
+        return null;
+      return getQueueKey(url);
+    } catch {
+      return null;
+    }
+  }
+
+  class AnnotationStore {
+    storage;
+    constructor(factory = indexedDB, name = "plannotator-annotations-v1") {
+      this.storage = new EncryptedRecordStore(factory, name, "annotations");
+    }
+    close() {
+      return this.storage.close();
+    }
+    async apply(request, now = Date.now()) {
+      const input = validateRequest2(request);
+      return this.storage.apply(input.key, () => ({ key: input.key, revision: 0, notes: [], tombstones: [] }), (state) => {
+        const before = JSON.stringify(state);
+        mutate2(state, input, now);
+        const changed = JSON.stringify(state) !== before;
+        if (changed) {
+          if (state.notes.length > ANNOTATION_MAX_NOTES || JSON.stringify(state.notes).length > MAX_DOCUMENT_TEXT) {
+            throw new Error("This conversation has reached its annotation storage limit. Remove some notes and retry.");
+          }
+          state.revision++;
+        }
+        const result = { notes: structuredClone(state.notes), revision: state.revision, changed };
+        return { value: state, result, changed };
+      });
+    }
+  }
+  function validId(id) {
+    return typeof id === "string" && /^[A-Za-z0-9:_-]{1,128}$/.test(id);
+  }
+  function validateRequest2(request) {
+    if (!request || request.type !== ANNOTATION_MESSAGE_TYPE || typeof request.key !== "string" || request.key.length > 2048 || !/^(chatgpt|claude|gemini|fixture):.+$/.test(request.key))
+      throw new Error("Invalid annotation conversation");
+    if (!["read", "upsert", "remove", "import"].includes(request.action))
+      throw new Error("Unknown annotation action");
+    if (request.action === "read")
+      return { type: request.type, key: request.key, action: request.action };
+    if (request.action === "remove") {
+      if (!Array.isArray(request.ids) || request.ids.length > ANNOTATION_MAX_NOTES || !request.ids.every(validId))
+        throw new Error("Invalid annotation IDs");
+      return { type: request.type, key: request.key, action: request.action, ids: [...new Set(request.ids)] };
+    }
+    if (!Array.isArray(request.notes) || request.notes.length > ANNOTATION_MAX_NOTES)
+      throw new Error("Invalid annotation notes");
+    const notes = request.notes.map(cleanNote);
+    if (new Set(notes.map((note) => note.id)).size !== notes.length)
+      throw new Error("Duplicate annotation IDs");
+    if (JSON.stringify(notes).length > MAX_DOCUMENT_TEXT)
+      throw new Error("These annotations are too large to save in one request");
+    return { type: request.type, key: request.key, action: request.action, notes };
+  }
+  function cleanNote(note) {
+    if (!note || !validId(note.id) || typeof note.messageId !== "string" || !note.messageId || note.messageId.length > 512)
+      throw new Error("Invalid annotation identity");
+    for (const field of ["messageExcerpt", "quote", "comment", "contextBefore", "contextAfter"]) {
+      if (typeof note[field] !== "string" || note[field].length > ANNOTATION_MAX_TEXT)
+        throw new Error(`Annotation ${field} must contain at most ${ANNOTATION_MAX_TEXT.toLocaleString()} characters`);
+    }
+    if (!Number.isFinite(note.createdAt) || note.createdAt < 0)
+      throw new Error("Invalid annotation creation time");
+    for (const offset of [note.startOffset, note.endOffset]) {
+      if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0))
+        throw new Error("Invalid annotation selection offset");
+    }
+    if (note.startOffset !== undefined && note.endOffset !== undefined && note.startOffset > note.endOffset)
+      throw new Error("Invalid annotation selection range");
+    return {
+      id: note.id,
+      messageId: note.messageId,
+      messageExcerpt: note.messageExcerpt,
+      quote: note.quote,
+      comment: note.comment,
+      contextBefore: note.contextBefore,
+      contextAfter: note.contextAfter,
+      ...note.startOffset !== undefined ? { startOffset: note.startOffset } : {},
+      ...note.endOffset !== undefined ? { endOffset: note.endOffset } : {},
+      createdAt: note.createdAt
+    };
+  }
+  function mutate2(state, request, now) {
+    if (request.action === "read")
+      return;
+    if (request.action === "remove") {
+      for (const id of request.ids) {
+        const note = state.notes.find((entry) => entry.id === id);
+        state.notes = state.notes.filter((entry) => entry.id !== id);
+        if (!state.tombstones.some((entry) => entry.id === id))
+          state.tombstones.push({ id, createdAt: note?.createdAt ?? now });
+      }
+      while (state.tombstones.length > ANNOTATION_MAX_TOMBSTONES) {
+        const retired = state.tombstones.shift();
+        state.retiredBefore = Math.max(state.retiredBefore ?? 0, retired.createdAt);
+      }
+      return;
+    }
+    for (const note of request.notes) {
+      const index = state.notes.findIndex((entry) => entry.id === note.id);
+      if (request.action === "import" && (index >= 0 || state.tombstones.some((entry) => entry.id === note.id)))
+        continue;
+      if (state.tombstones.some((entry) => entry.id === note.id))
+        throw new Error("This annotation was removed in another tab. Create a new note to restore it.");
+      if (index < 0 && state.retiredBefore !== undefined && note.createdAt <= state.retiredBefore) {
+        throw new Error("These older annotations may have been deleted. Keep their source copy and create a new note to restore them.");
+      }
+      if (index < 0)
+        state.notes.push(note);
+      else
+        state.notes[index] = note;
+    }
+  }
+
+  // src/content.ts
+  var ROOT_ID = "plannotator-chatgpt-root";
+  var STYLE_ID = "plannotator-chatgpt-page-style";
+  var MESSAGE_ID_ATTR = "data-plannotator-message-id";
+  var STORAGE_KEY_PREFIX = "plannotator-chatgpt-notes:v1:";
+  var HIGHLIGHT_NAME = "plannotator-notes";
+  var ACTIVE_HIGHLIGHT_NAME = "plannotator-note-active";
+  var MAX_EXCERPT = 120;
+  var CONTEXT_WINDOW = 48;
+  var POPOVER_WIDTH = 260;
+  var POPOVER_GAP = 14;
+  var SELECTION_SETTLE_MS = 140;
+  var NOTE_MAX_ROWS = 4;
+  var ACTION_SUCCESS_MS = 1400;
+  var PERSIST_DEBOUNCE_MS = 120;
+  var CONVERSATION_POLL_MS = 400;
+  var DEV_POLL_INTERVAL_MS = 700;
+  var DEV_ENABLED = true;
+  var DEV_BUILD_ID = "mute98hi-rexalk";
+  var state = {
+    notes: [],
+    activeNoteId: null,
+    selectionDraft: null,
+    draftEditorOpen: false,
+    draftText: "",
+    notesMenuOpen: false,
+    actionFeedback: "idle",
+    actionError: ""
+  };
+  var annotationSessions = new Map;
+  var annotationUi = null;
+  var selectionFrame = 0;
+  var selectionSettleTimer = null;
+  var selectionVersion = 0;
+  var draftFocusFrame = 0;
+  var draftFocusVersion = 0;
+  var renderFrame = 0;
+  var actionFeedbackTimer = null;
+  var persistTimer = null;
+  var currentConversationKey = null;
+  var pendingRestoreNotes = [];
+  var restoreFrame = 0;
+  var conversationPollTimer = 0;
+  var restoreObserver = null;
+  var domRefreshObserver = null;
+  var suppressActiveScrollClearUntil = 0;
+  if (window.top === window) {
+    bootstrap();
+  }
+  function bootstrap() {
+    if (document.getElementById(ROOT_ID))
+      return;
+    ensurePageStyles();
+    const ui = createUi();
+    annotationUi = ui;
+    if (true)
+      startDevHotReload();
+    startConversationPersistence(ui);
+    startDomRefreshObserver(ui);
+    document.addEventListener("selectionchange", () => {
+      if (selectionFrame)
+        return;
+      selectionFrame = window.requestAnimationFrame(() => {
+        selectionFrame = 0;
+        syncSelectionDraft(ui);
+      });
+    }, true);
+    window.addEventListener("keydown", (event) => {
+      const origin = event.composedPath()[0];
+      const target = origin instanceof HTMLElement ? origin : null;
+      const noteField = (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) && target.getRootNode() === ui.shadow;
+      if (noteField)
+        event.stopImmediatePropagation();
+      const draftField = (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) && noteField && target.dataset.field === "draft";
+      if (event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === "enter") {
+          event.preventDefault();
+          insertPrompt(ui);
+          return;
+        }
+        if (key === "i") {
+          event.preventDefault();
+          insertPrompt(ui);
+          return;
+        }
+        if (key === "c") {
+          event.preventDefault();
+          navigator.clipboard.writeText(buildPrompt());
+          return;
+        }
+        if (key === "k") {
+          event.preventDefault();
+          clearActionFeedback();
+          clearAllNotes();
+          render(ui);
+          return;
+        }
+      }
+      if (draftField && event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        state.draftText = target.value;
+        commitDraftNote();
+        render(ui);
+        return;
+      }
+      if (event.key !== "Escape")
+        return;
+      if (state.notesMenuOpen) {
+        state.notesMenuOpen = false;
+        render(ui);
+        return;
+      }
+      if (draftField) {
+        clearSelectionDraft();
+        render(ui);
+        return;
+      }
+      clearSelectionDraft();
+      if (state.activeNoteId) {
+        state.activeNoteId = null;
+      }
+      render(ui);
+    }, true);
+    document.addEventListener("pointerdown", (event) => {
+      if (event.composedPath().includes(ui.host))
+        return;
+      if (!state.activeNoteId && !state.selectionDraft && !state.notesMenuOpen)
+        return;
+      clearSelectionDraft();
+      state.activeNoteId = null;
+      state.notesMenuOpen = false;
+      scheduleRender(ui);
+    }, true);
+    window.addEventListener("resize", () => scheduleRender(ui), { passive: true });
+    window.addEventListener("scroll", () => handleViewportScroll(ui), { passive: true });
+    document.addEventListener("scroll", () => handleViewportScroll(ui), {
+      passive: true,
+      capture: true
+    });
+    window.addEventListener("wheel", () => clearActiveNoteFromUserScroll(ui), {
+      passive: true,
+      capture: true
+    });
+    window.addEventListener("touchmove", () => clearActiveNoteFromUserScroll(ui), {
+      passive: true,
+      capture: true
+    });
+    window.addEventListener("pagehide", () => {
+      flushPersistedConversationState();
+    }, { capture: true });
+    window.addEventListener("beforeunload", (event) => {
+      if (!hasUnsavedAnnotationChanges())
+        return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+    render(ui);
+    loadPersistedConversationState(ui);
+  }
+  function startDevHotReload() {
+    if (false)
+      ;
+    const runtime = globalThis.chrome?.runtime;
+    if (!runtime?.sendMessage)
+      return;
+    const sendMessage = runtime.sendMessage.bind(runtime);
+    setDevReloadState("polling");
+    let polling = false;
+    let needsPageReload = false;
+    let reloadTimer = 0;
+    const safeToReload = () => {
+      const composer = findQueueComposer();
+      const noteShadow = document.getElementById(ROOT_ID)?.shadowRoot;
+      const queueHost = document.getElementById("plannotator-message-queue");
+      const queueShadow = queueHost?.shadowRoot;
+      return Boolean(composer && !readComposer(composer).trim() && !isChatBusy() && !hasComposerAttachments() && !state.draftEditorOpen && !state.draftText.trim() && !persistTimer && !hasUnsavedAnnotationChanges() && state.actionFeedback !== "loading" && !noteShadow?.querySelector("textarea") && queueHost?.getAttribute("data-reload-blocked") !== "true" && !queueShadow?.querySelector("textarea, button[data-action='enqueue']:disabled"));
+    };
+    const schedulePageReload = (delayMs = 420) => {
+      if (reloadTimer)
+        return;
+      if (!safeToReload()) {
+        setDevReloadState("waiting-for-idle");
+        return;
+      }
+      setDevReloadState("page-reload-scheduled");
+      reloadTimer = window.setTimeout(() => {
+        reloadTimer = 0;
+        if (!safeToReload()) {
+          setDevReloadState("waiting-for-idle");
+          return;
+        }
+        setDevReloadState("page-reloading");
+        window.location.reload();
+      }, delayMs);
+    };
+    runtime.onMessage?.addListener?.((message, _sender, respond) => {
+      if (message?.type === "plannotator:dev-can-reload") {
+        respond?.({ ok: true, safe: safeToReload() });
+        return;
+      }
+      if (message?.type !== "plannotator:dev-page-reload") {
+        return;
+      }
+      needsPageReload = true;
+      setDevReloadState("page-reload-message");
+      schedulePageReload();
+    });
+    const poll = async () => {
+      if (polling || reloadTimer)
+        return;
+      if (needsPageReload) {
+        schedulePageReload();
+        return;
+      }
+      polling = true;
+      try {
+        const payload = await sendMessage({ type: "plannotator:dev-version" });
+        if (!payload?.buildId || payload.buildId === "booting" || payload.buildId === DEV_BUILD_ID && payload.workerBuildId === DEV_BUILD_ID) {
+          return;
+        }
+        if (payload.workerBuildId === payload.buildId) {
+          needsPageReload = true;
+          setDevReloadState(`worker-current:${payload.buildId}`);
+          schedulePageReload();
+          return;
+        }
+        if (!safeToReload()) {
+          setDevReloadState("waiting-for-idle");
+          return;
+        }
+        setDevReloadState(`build-change:${payload.buildId}`);
+        const reply = await sendMessage({ type: "plannotator:dev-reload", buildId: payload.buildId });
+        if (reply?.ok && reply.scheduled === false) {
+          setDevReloadState("waiting-for-other-tabs");
+          return;
+        }
+        if (reply?.ok && reply.scheduled === true) {
+          setDevReloadState(`reload-requested:${payload.buildId}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/context invalidated/i.test(message)) {
+          needsPageReload = true;
+          schedulePageReload();
+        }
+      } finally {
+        polling = false;
+      }
+    };
+    poll();
+    window.setInterval(() => {
+      poll();
+    }, DEV_POLL_INTERVAL_MS);
+  }
+  function ensurePageStyles() {
+    if (document.getElementById(STYLE_ID))
+      return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+    ::highlight(${HIGHLIGHT_NAME}) {
       background: rgba(251, 191, 36, 0.35);
       color: inherit;
     }
 
-    ::highlight(${PZ}) {
+    ::highlight(${ACTIVE_HIGHLIGHT_NAME}) {
       background: rgba(245, 158, 11, 0.62);
       color: inherit;
     }
-  `,document.head.appendChild(Z)}function i0(){let Z=document.createElement("div");if(Z.id=c,RZ)Z.dataset.buildId=MZ,Z.dataset.reloadState="booted";document.body.appendChild(Z);let $=Z.attachShadow({mode:"open"});$.innerHTML=`
+  `;
+    document.head.appendChild(style);
+  }
+  function createUi() {
+    const host = document.createElement("div");
+    host.id = ROOT_ID;
+    if (DEV_ENABLED) {
+      host.dataset.buildId = DEV_BUILD_ID;
+      host.dataset.reloadState = "booted";
+    }
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
     <style>
       :host {
         all: initial;
       }
+
+      .icon { display: block; flex: none; pointer-events: none; }
+      button:focus-visible { outline: 2px solid #458cff; outline-offset: 3px; }
 
       .shell {
         position: fixed;
@@ -237,6 +1902,14 @@
       .notes-menu-row.active {
         background: rgba(251, 191, 36, 0.22);
       }
+      .notes-menu-item { display: flex; align-items: center; }
+      .notes-menu-item .notes-menu-row { min-width: 0; }
+      .notes-menu-delete { flex: none; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: #64748b; cursor: pointer; }
+      .notes-menu-delete:hover { background: #fee2e2; color: #b91c1c; }
+      .notes-help { padding: 8px; margin: 0; font-size: 11px; color: #64748b; }
+      .notes-status { max-width: min(340px, calc(100vw - 150px)); padding: 8px 10px; border-radius: 8px; background: white; box-shadow: 0 4px 18px #0f172a22; font-size: 12px; }
+      .notes-status.error { color: #991b1b; }
+      .notes-status button { margin-left: 6px; font: inherit; cursor: pointer; }
 
       .notes-menu-index {
         width: 22px;
@@ -277,13 +1950,11 @@
       }
 
       .notes-action-spinner {
-        width: 16px;
-        height: 16px;
-        border-radius: 999px;
-        border: 2px solid rgba(255, 255, 255, 0.35);
-        border-top-color: white;
-        box-sizing: border-box;
         animation: notes-action-spin 720ms linear infinite;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .notes-action-spinner { animation: none; }
       }
 
       @keyframes notes-action-spin {
@@ -307,64 +1978,249 @@
       <div class="popover-layer" id="popover-layer"></div>
       <div class="actions-layer" id="actions-layer"></div>
     </div>
-  `;let J=$.getElementById("markers-layer"),Y=$.getElementById("popover-layer"),X=$.getElementById("actions-layer");if(!J||!Y||!X)throw Error("Plannotator extension failed to initialize its UI");let j={host:Z,shadow:$,markersLayer:J,popoverLayer:Y,actionsLayer:X};$.addEventListener("pointerdown",(U)=>{let G=U.target;if(G?.closest("[data-action='open-draft']")){U.preventDefault(),H.draftEditorOpen=!0,H.activeNoteId=null,K(j);return}if(G?.closest("[data-action='insert-notes']")){if(U.preventDefault(),H.notes.length===0||H.actionFeedback!=="idle")return;CZ(j);return}}),$.addEventListener("click",(U)=>{let G=U.target;if(!G)return;if(G.closest("[data-action='open-draft']"))return;if(G.closest("[data-action='insert-notes']"))return;if(G.closest("[data-action='toggle-notes-menu']")){if(H.notes.length===0)return;H.notesMenuOpen=!H.notesMenuOpen,K(j);return}let V=G.closest("[data-action='jump-note']");if(V?.dataset.noteId){W1(V.dataset.noteId,j);return}if(G.dataset.action==="delete-note"){let W=G.closest("[data-note-id]")?.dataset.noteId;if(!W)return;J1(W),K(j);return}return});let D=(U)=>{if(U.dataset.field==="draft")H.draftText=U.value;else{let G=U.closest("[data-note-id]")?.dataset.noteId;if(G)$1(G,{comment:U.value})}zZ(U)};$.addEventListener("input",(U)=>{let G=U.composedPath()[0];if(G instanceof HTMLTextAreaElement||G instanceof HTMLInputElement)D(G)});for(let U of["keypress","keyup","beforeinput","input","paste","copy","cut"])window.addEventListener(U,(G)=>{let V=G.composedPath()[0];if(!(V instanceof HTMLTextAreaElement||V instanceof HTMLInputElement)||V.getRootNode()!==$)return;if(G.stopImmediatePropagation(),U!=="input")return;D(V)},!0);return j}function K(Z){o0(),a0(Z),r0(Z),n0(Z),K1()}function o0(){let Z=!1;if(H.notes=H.notes.flatMap(($)=>{if(O1($.range))return[$];let J=F0($);if(!J)return[$];return Z=!0,[J]}),Z)T()}function a0(Z){Z.markersLayer.innerHTML=""}function n0(Z){let $=H.actionFeedback==="loading",J=H.actionFeedback==="inserted";if(H.notes.length===0&&!$&&!J){Z.actionsLayer.innerHTML="";return}let Y=u(),X=24;if(Y instanceof HTMLElement){let U=Y.getBoundingClientRect();if(U.top<window.innerHeight)X=E(window.innerHeight-U.top+18,24,180)}let j=H.notesMenuOpen&&H.notes.length>0?s0():"",D=H.notes.length>0?`
+  `;
+    const markersLayer = shadow.getElementById("markers-layer");
+    const popoverLayer = shadow.getElementById("popover-layer");
+    const actionsLayer = shadow.getElementById("actions-layer");
+    if (!markersLayer || !popoverLayer || !actionsLayer) {
+      throw new Error("Threadlane extension failed to initialize its UI");
+    }
+    const ui = {
+      host,
+      shadow,
+      markersLayer,
+      popoverLayer,
+      actionsLayer
+    };
+    shadow.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (target?.closest("[data-action='open-draft']")) {
+        event.preventDefault();
+        state.draftEditorOpen = true;
+        state.activeNoteId = null;
+        render(ui);
+        return;
+      }
+      if (target?.closest("[data-action='insert-notes']")) {
+        event.preventDefault();
+        if (state.notes.length === 0 || state.actionFeedback !== "idle")
+          return;
+        insertPrompt(ui);
+        return;
+      }
+    });
+    shadow.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!target)
+        return;
+      if (target.closest("[data-action='retry-notes']")) {
+        retryAnnotationSave();
+        return;
+      }
+      if (target.closest("[data-action='open-draft']")) {
+        if (event instanceof MouseEvent && event.detail === 0) {
+          state.draftEditorOpen = true;
+          state.activeNoteId = null;
+          render(ui);
+        }
+        return;
+      }
+      if (target.closest("[data-action='insert-notes']")) {
+        if (event instanceof MouseEvent && event.detail === 0 && state.notes.length > 0 && state.actionFeedback === "idle")
+          insertPrompt(ui);
+        return;
+      }
+      if (target.closest("[data-action='toggle-notes-menu']")) {
+        if (allConversationNotes().length === 0)
+          return;
+        state.notesMenuOpen = !state.notesMenuOpen;
+        render(ui);
+        return;
+      }
+      const jumpTarget = target.closest("[data-action='jump-note']");
+      if (jumpTarget?.dataset.noteId) {
+        jumpToNote(jumpTarget.dataset.noteId, ui);
+        return;
+      }
+      const deleteTarget = target.closest("[data-action='delete-note']");
+      if (deleteTarget) {
+        const noteId = deleteTarget.closest("[data-note-id]")?.dataset.noteId;
+        if (!noteId)
+          return;
+        deleteNote(noteId);
+        render(ui);
+        return;
+      }
+      return;
+    });
+    const updateNoteField = (target) => {
+      if (currentConversationKey !== getConversationStorageKey()) {
+        if (target.dataset.field === "draft")
+          state.draftText = target.value;
+        ensureAnnotationRoute();
+        return;
+      }
+      if (target.dataset.field === "draft")
+        state.draftText = target.value;
+      else {
+        const noteId = target.closest("[data-note-id]")?.dataset.noteId;
+        if (noteId)
+          updateNote(noteId, { comment: target.value });
+      }
+      autosizeNoteField(target);
+    };
+    shadow.addEventListener("input", (event) => {
+      const target = event.composedPath()[0];
+      if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement)
+        updateNoteField(target);
+    });
+    for (const type of ["keypress", "keyup", "beforeinput", "input", "paste", "copy", "cut"]) {
+      window.addEventListener(type, (event) => {
+        const target = event.composedPath()[0];
+        if (!(target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) || target.getRootNode() !== shadow)
+          return;
+        event.stopImmediatePropagation();
+        if (type !== "input")
+          return;
+        updateNoteField(target);
+      }, true);
+    }
+    return ui;
+  }
+  function render(ui) {
+    reanchorDetachedNotes();
+    renderMarkers(ui);
+    renderPopover(ui);
+    renderActions(ui);
+    renderHighlights();
+  }
+  function reanchorDetachedNotes() {
+    let changed = false;
+    state.notes = state.notes.flatMap((note) => {
+      if (getRangeRect(note.range)) {
+        return [note];
+      }
+      const restored = restorePersistedNote(note);
+      if (!restored) {
+        return [note];
+      }
+      changed = true;
+      return [restored];
+    });
+  }
+  function renderMarkers(ui) {
+    ui.markersLayer.innerHTML = "";
+  }
+  function renderActions(ui) {
+    const isLoading = state.actionFeedback === "loading";
+    const isSuccess = state.actionFeedback === "inserted";
+    const notes = allConversationNotes();
+    const session = currentAnnotationSession();
+    const otherUnsaved = Array.from(annotationSessions.values()).find((entry) => entry !== session && (entry.pending.size > 0 || entry.draft?.text.trim() || !entry.key && entry.notes.size));
+    const error = session.error || session.migrationError || state.actionError;
+    const status = error || (session.pending.size || session.loading || session.flushing ? "Saving notes…" : "");
+    if (notes.length === 0 && !isLoading && !isSuccess && !status && !otherUnsaved) {
+      ui.actionsLayer.innerHTML = "";
+      return;
+    }
+    const composer = findComposer();
+    let bottom = 24;
+    if (composer instanceof HTMLElement) {
+      const rect = composer.getBoundingClientRect();
+      if (rect.top < window.innerHeight) {
+        bottom = clamp(window.innerHeight - rect.top + 18, 24, 180);
+      }
+    }
+    const menu = state.notesMenuOpen && notes.length > 0 ? renderNotesMenu() : "";
+    const toggleButton = notes.length > 0 ? `
     <button
-      class="notes-list-toggle${H.notesMenuOpen?" active":""}"
+      class="notes-list-toggle${state.notesMenuOpen ? " active" : ""}"
       data-action="toggle-notes-menu"
       type="button"
       title="Show notes"
       aria-label="Show notes"
-      aria-expanded="${H.notesMenuOpen?"true":"false"}"
-    >${H.notes.length}</button>
-  `:"";Z.actionsLayer.innerHTML=`
-    <div class="notes-toolbar" style="bottom:${X}px;">
-      ${j}
-      ${D}
+      aria-expanded="${state.notesMenuOpen ? "true" : "false"}"
+    >${notes.length}</button>
+  ` : "";
+    ui.actionsLayer.innerHTML = `
+    <div class="notes-toolbar" style="bottom:${bottom}px;">
+      ${menu}
+      ${status ? `<span class="notes-status${error ? " error" : ""}" role="${error ? "alert" : "status"}">${escapeHtml(status)}${session.error || session.migrationError ? '<button data-action="retry-notes" type="button">Retry save</button>' : ""}</span>` : ""}
+      ${otherUnsaved ? `<span class="notes-status error" role="alert">Notes in another chat are not saved. <a href="${escapeHtml(otherUnsaved.route.slice(STORAGE_KEY_PREFIX.length))}">Return to save</a></span>` : ""}
+      ${toggleButton}
     <button
-      class="notes-action${$?" loading":""}${J?" success":""}"
+      class="notes-action${isLoading ? " loading" : ""}${isSuccess ? " success" : ""}"
       data-action="insert-notes"
       type="button"
-      title="${$?"Inserting into":J?"Inserted into":"Insert notes into"} ${VZ()}"
-      aria-label="${$?"Inserting into":J?"Inserted into":"Insert notes into"} ${VZ()}"
-      data-state="${$?"loading":J?"success":"idle"}"
-      ${$||J?"disabled":""}
+      title="${isLoading ? "Inserting into" : isSuccess ? "Inserted into" : "Insert notes into"} ${getProviderName()}"
+      aria-label="${isLoading ? "Inserting into" : isSuccess ? "Inserted into" : "Insert notes into"} ${getProviderName()}"
+      data-state="${isLoading ? "loading" : isSuccess ? "success" : "idle"}"
+      ${isLoading || isSuccess || state.notes.length === 0 ? "disabled" : ""}
     >
-      ${$?'<span class="notes-action-spinner" aria-hidden="true"></span>':J?`<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path fill="currentColor" d="M6.55 11.64 2.91 8l1.06-1.06 2.58 2.58 5.48-5.48L13.09 5.1z"/>
-      </svg>`:`<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <path fill="currentColor" d="M2 8.75h7.19L6.47 11.47 7.53 12.53 12.06 8 7.53 3.47 6.47 4.53 9.19 7.25H2z"/>
-      </svg>`}
+      ${isLoading ? icon("loader", 16, "notes-action-spinner") : isSuccess ? icon("check") : icon("arrow-right")}
     </button>
     </div>
-  `}function s0(){return`
+  `;
+  }
+  function renderNotesMenu() {
+    return `
     <section class="notes-menu" aria-label="Saved notes">
-      ${e().map((Z,$)=>`
+      <p class="notes-help">Saved notes remain until you delete them.</p>
+      ${allConversationNotes().map((note, index) => `
+        <div class="notes-menu-item" data-note-id="${escapeHtml(note.id)}">
         <button
-          class="notes-menu-row${Z.id===H.activeNoteId?" active":""}"
+          class="notes-menu-row${note.id === state.activeNoteId ? " active" : ""}"
           data-action="jump-note"
-          data-note-id="${Z.id}"
+          data-note-id="${escapeHtml(note.id)}"
           type="button"
-          title="${OZ(Z.comment||Z.quote)}"
-          aria-label="Jump to note ${$+1}"
+          title="${escapeHtml(note.comment || note.quote)}"
+          aria-label="Jump to note ${index + 1}"
         >
-          <span class="notes-menu-index">${$+1}</span>
+          <span class="notes-menu-index">${index + 1}</span>
           <span class="notes-menu-text">
-            <span class="notes-menu-comment">${OZ(D0(Z.comment||"Untitled note",80))}</span>
-            <span class="notes-menu-quote">${OZ(D0(Z.quote,90))}</span>
+            <span class="notes-menu-comment">${escapeHtml(truncateInline(note.comment || "Untitled note", 80))}</span>
+            <span class="notes-menu-quote">${escapeHtml(truncateInline(note.quote, 90))}</span>
           </span>
         </button>
+        <button class="notes-menu-delete" data-action="delete-note" type="button" aria-label="Delete note ${index + 1}" title="Delete note ${index + 1}">${icon("trash")}</button>
+        </div>
       `).join("")}
     </section>
-  `}function r0(Z){let $=H.selectionDraft;if(!$){v(),Z.popoverLayer.innerHTML="";return}if(!H.draftEditorOpen){v();let _=X0($.rect),O=Q1($.rect,_),M=E($.rect.top+$.rect.height/2-12,12,window.innerHeight-24-12);Z.popoverLayer.innerHTML=`
+  `;
+  }
+  function renderPopover(ui) {
+    const draft = state.selectionDraft;
+    if (!draft) {
+      cancelDraftFocus();
+      ui.popoverLayer.innerHTML = "";
+      return;
+    }
+    if (!state.draftEditorOpen) {
+      cancelDraftFocus();
+      const side2 = pickSide(draft.rect);
+      const triggerX = getDraftTriggerX(draft.rect, side2);
+      const triggerY = clamp(draft.rect.top + draft.rect.height / 2 - 12, 12, window.innerHeight - 24 - 12);
+      ui.popoverLayer.innerHTML = `
       <button
         class="selection-trigger"
         data-action="open-draft"
         type="button"
         aria-label="Add note"
         title="Add note"
-        style="left:${O}px;top:${M}px;"
-      >+</button>
-    `;return}let J=_0($),Y=X0($.rect),X=$.rect,j=Z.popoverLayer.querySelector(".note-popover[data-draft-editor='true']"),D=j?.querySelector("textarea[data-field='draft']")??null,U=!1;if(!j||!D||j.dataset.draftKey!==J){if(v(),Z.popoverLayer.innerHTML=`
+        style="left:${triggerX}px;top:${triggerY}px;"
+      >${icon("plus")}</button>
+    `;
+      return;
+    }
+    const draftKey = getSelectionDraftKey(draft);
+    const side = pickSide(draft.rect);
+    const rect = draft.rect;
+    let popover = ui.popoverLayer.querySelector(".note-popover[data-draft-editor='true']");
+    let field = popover?.querySelector("textarea[data-field='draft']") ?? null;
+    let created = false;
+    if (!popover || !field || popover.dataset.draftKey !== draftKey) {
+      cancelDraftFocus();
+      ui.popoverLayer.innerHTML = `
       <section class="note-popover" data-draft-editor="true">
         <div class="note-popover-shell">
           <textarea
@@ -377,10 +2233,1191 @@
           ></textarea>
         </div>
       </section>
-    `,j=Z.popoverLayer.querySelector(".note-popover"),D=j?.querySelector("textarea[data-field='draft']")??null,!j||!D)return;j.dataset.draftKey=J,D.value=H.draftText,U=!0}else if(D.value!==H.draftText){let _=Z.shadow.activeElement===D,O=D.selectionStart,M=D.selectionEnd;if(D.value=H.draftText,_){let h=D.value.length;D.setSelectionRange(Math.min(O,h),Math.min(M,h))}}j.dataset.side=Y,zZ(D),j.style.left="-9999px",j.style.top="-9999px";let G=j.offsetHeight||52,V=B1(Y,X),W=E(X.top+X.height/2-G/2,12,window.innerHeight-G-12);if(j.style.left=`${V}px`,j.style.top=`${W}px`,U)F1(Z,J,D)}function _0(Z){return JSON.stringify([Z.messageId,Z.startOffset,Z.endOffset,Z.quote])}function t0(Z){if(P1(Z))return;let $=e0();r+=1;let J=r;if(L)clearTimeout(L),L=null;if(!$){if(!H.draftEditorOpen||!H.selectionDraft)H.selectionDraft=null,H.draftEditorOpen=!1;K(Z);return}L=setTimeout(()=>{if(J!==r)return;let Y=H.selectionDraft?.messageId??null,X=$.messageId;if(Y!==X||H.selectionDraft?.quote!==$.quote)H.draftText="",H.draftEditorOpen=!1,H.activeNoteId=null;H.selectionDraft=$,K(Z)},f0)}function e0(){let Z=document.getSelection();if(!Z||Z.isCollapsed||Z.rangeCount===0)return null;let $=Z.getRangeAt(0);if(!$||$.collapsed)return null;let J=j0($.startContainer),Y=j0($.endContainer);if(!J||J!==Y)return null;if(O0($.commonAncestorContainer))return null;let X=B(Z.toString()).trim();if(!X)return null;let j=M1($)??$.getBoundingClientRect();if(!j.width&&!j.height)return null;let D=LZ(J),U=A1(J,$),G=ZZ(J);return{messageId:D,quote:X,range:M0($),messageExcerpt:B(G).slice(0,q0),contextBefore:B(G.slice(Math.max(0,U.start-$0),U.start)),contextAfter:B(G.slice(U.end,U.end+$0)),startOffset:U.start,endOffset:U.end,rect:j}}function Z1(){let Z=H.selectionDraft;if(!Z)return;let $=H.draftText.trim();if(!$){k();return}let J={id:crypto.randomUUID(),messageId:Z.messageId,messageExcerpt:Z.messageExcerpt,quote:Z.quote,comment:$,contextBefore:Z.contextBefore,contextAfter:Z.contextAfter,startOffset:Z.startOffset,endOffset:Z.endOffset,range:Z.range,createdAt:Date.now()};I(),H.notes.push(J),H.activeNoteId=null,k(),T()}function $1(Z,$){let J=H.notes.find((Y)=>Y.id===Z);if(!J)return;if($.comment!==void 0)J.comment=$.comment;T()}function J1(Z){let $=e().filter((J)=>J.id!==Z);if(H.notes=$,H.activeNoteId===Z)H.activeNoteId=$.at(-1)?.id??null;T()}function NZ(){H.notes=[],H.activeNoteId=null,H.notesMenuOpen=!1,R=[],m(),k();let Z=CSS.highlights;Z?.set(AZ,new Highlight),Z?.set(PZ,new Highlight),T()}function K0(){if(H.notes.length===0)return"Select assistant text and add at least one note.";return e().map((Z)=>[`user: ${W0(Z.comment)}`,`responding to AI selected text: ${W0(Z.quote)}`].join(`
+    `;
+      popover = ui.popoverLayer.querySelector(".note-popover");
+      field = popover?.querySelector("textarea[data-field='draft']") ?? null;
+      if (!popover || !field)
+        return;
+      popover.dataset.draftKey = draftKey;
+      field.value = state.draftText;
+      created = true;
+    } else if (field.value !== state.draftText) {
+      const wasFocused = ui.shadow.activeElement === field;
+      const selectionStart = field.selectionStart;
+      const selectionEnd = field.selectionEnd;
+      field.value = state.draftText;
+      if (wasFocused) {
+        const valueLength = field.value.length;
+        field.setSelectionRange(Math.min(selectionStart, valueLength), Math.min(selectionEnd, valueLength));
+      }
+    }
+    popover.dataset.side = side;
+    autosizeNoteField(field);
+    popover.style.left = "-9999px";
+    popover.style.top = "-9999px";
+    const measuredHeight = popover.offsetHeight || 52;
+    const popoverLeft = getPopoverLeft(side, rect);
+    const popoverTop = clamp(rect.top + rect.height / 2 - measuredHeight / 2, 12, window.innerHeight - measuredHeight - 12);
+    popover.style.left = `${popoverLeft}px`;
+    popover.style.top = `${popoverTop}px`;
+    if (created) {
+      focusDraftField(ui, draftKey, field);
+    }
+  }
+  function getSelectionDraftKey(draft) {
+    return JSON.stringify([
+      draft.messageId,
+      draft.startOffset,
+      draft.endOffset,
+      draft.quote
+    ]);
+  }
+  function syncSelectionDraft(ui) {
+    syncAnnotationRoute(ui);
+    if (isDraftInputFocused(ui)) {
+      return;
+    }
+    const draft = getSelectionDraft();
+    selectionVersion += 1;
+    const version = selectionVersion;
+    if (selectionSettleTimer) {
+      clearTimeout(selectionSettleTimer);
+      selectionSettleTimer = null;
+    }
+    if (!draft) {
+      if (!state.draftEditorOpen || !state.selectionDraft) {
+        state.selectionDraft = null;
+        state.draftEditorOpen = false;
+      }
+      render(ui);
+      return;
+    }
+    selectionSettleTimer = setTimeout(() => {
+      if (version !== selectionVersion)
+        return;
+      const previousId = state.selectionDraft?.messageId ?? null;
+      const nextId = draft.messageId;
+      const changed = previousId !== nextId || state.selectionDraft?.quote !== draft.quote;
+      if (changed) {
+        state.draftText = "";
+        state.draftEditorOpen = false;
+        state.activeNoteId = null;
+      }
+      state.selectionDraft = draft;
+      render(ui);
+    }, SELECTION_SETTLE_MS);
+  }
+  function getSelectionDraft() {
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0)
+      return null;
+    const range = selection.getRangeAt(0);
+    if (!range || range.collapsed)
+      return null;
+    const startMessage = findAssistantMessage(range.startContainer);
+    const endMessage = findAssistantMessage(range.endContainer);
+    if (!startMessage || startMessage !== endMessage)
+      return null;
+    if (isInsideRoot(range.commonAncestorContainer))
+      return null;
+    const quote = collapseWhitespace(selection.toString()).trim();
+    if (!quote)
+      return null;
+    const rect = getSelectionTailRect(range) ?? range.getBoundingClientRect();
+    if (!rect.width && !rect.height)
+      return null;
+    const messageId2 = ensureMessageId(startMessage);
+    const offsets = getOffsetsWithin(startMessage, range);
+    const fullText = getNodeText(startMessage);
+    return {
+      messageId: messageId2,
+      quote,
+      range: createStableRange(range),
+      messageExcerpt: collapseWhitespace(fullText).slice(0, MAX_EXCERPT),
+      contextBefore: collapseWhitespace(fullText.slice(Math.max(0, offsets.start - CONTEXT_WINDOW), offsets.start)),
+      contextAfter: collapseWhitespace(fullText.slice(offsets.end, offsets.end + CONTEXT_WINDOW)),
+      startOffset: offsets.start,
+      endOffset: offsets.end,
+      rect
+    };
+  }
+  function commitDraftNote() {
+    if (!ensureAnnotationRoute())
+      return;
+    const draft = state.selectionDraft;
+    if (!draft)
+      return;
+    const comment = state.draftText.trim();
+    if (!comment) {
+      clearSelectionDraft();
+      return;
+    }
+    const note = {
+      id: crypto.randomUUID(),
+      messageId: draft.messageId,
+      messageExcerpt: draft.messageExcerpt,
+      quote: draft.quote,
+      comment,
+      contextBefore: draft.contextBefore,
+      contextAfter: draft.contextAfter,
+      startOffset: draft.startOffset,
+      endOffset: draft.endOffset,
+      range: draft.range,
+      createdAt: Date.now()
+    };
+    clearActionFeedback();
+    state.notes.push(note);
+    state.activeNoteId = null;
+    clearSelectionDraft();
+    queueAnnotationMutation({ action: "upsert", note: serializeNote(note) }, true);
+  }
+  function updateNote(noteId, updates) {
+    if (!ensureAnnotationRoute())
+      return;
+    const note = state.notes.find((entry) => entry.id === noteId);
+    if (!note)
+      return;
+    if (updates.comment !== undefined) {
+      note.comment = updates.comment;
+    }
+    queueAnnotationMutation({ action: "upsert", note: serializeNote(note) });
+  }
+  function deleteNote(noteId) {
+    if (!ensureAnnotationRoute())
+      return;
+    const remaining = getOrderedNotes().filter((note) => note.id !== noteId);
+    state.notes = remaining;
+    if (state.activeNoteId === noteId) {
+      state.activeNoteId = remaining.at(-1)?.id ?? null;
+    }
+    pendingRestoreNotes = pendingRestoreNotes.filter((note) => note.id !== noteId);
+    queueAnnotationMutation({ action: "remove", id: noteId }, true);
+  }
+  function clearAllNotes() {
+    if (!ensureAnnotationRoute())
+      return;
+    const ids = allConversationNotes().map((note) => note.id);
+    state.notes = [];
+    state.activeNoteId = null;
+    state.notesMenuOpen = false;
+    pendingRestoreNotes = [];
+    stopRestoreObserver();
+    clearSelectionDraft();
+    const cssHighlights = CSS.highlights;
+    cssHighlights?.set(HIGHLIGHT_NAME, new Highlight);
+    cssHighlights?.set(ACTIVE_HIGHLIGHT_NAME, new Highlight);
+    for (const id of ids)
+      queueAnnotationMutation({ action: "remove", id });
+    flushPersistedConversationState();
+  }
+  function buildPrompt() {
+    if (state.notes.length === 0) {
+      return "Select assistant text and add at least one note.";
+    }
+    return getOrderedNotes().map((note) => [
+      `user: ${formatPromptValue(note.comment)}`,
+      `responding to AI selected text: ${formatPromptValue(note.quote)}`
+    ].join(`
 `)).join(`
 
-`).trim()}async function CZ(Z){if(H.notes.length===0||H.actionFeedback==="loading")return;let $=u();if(!$){console.warn("[Plannotator] Composer not found.");return}I(),H.actionFeedback="loading",K(Z),await g1();let J=K0();if(!U1($,J)){I(),K(Z);return}NZ(),l(),p1(Z),K(Z)}function Y1(Z){if(P=g(),J0)return;J0=window.setInterval(()=>{let $=g();if($===P)return;l({preserveExistingOnEmpty:!0}),m(),R=[],I(),k(),H.notes=[],H.activeNoteId=null,H.notesMenuOpen=!1,P=$,K(Z),B0(Z)},g0)}function G1(Z){if(BZ||!document.body)return;BZ=new MutationObserver(()=>{if(R.length>0)IZ(Z);if(H.notes.length>0)p(Z)}),BZ.observe(document.body,{childList:!0,subtree:!0,characterData:!0})}async function B0(Z){if(P=g(),R=R1(P),H.notes=[],H.activeNoteId=null,H.notesMenuOpen=!1,R.length===0){m(),K(Z);return}IZ(Z)}function T(){if(P??=g(),N)clearTimeout(N);N=window.setTimeout(()=>{N=null,l()},p0)}function l(Z={}){if(N)clearTimeout(N),N=null;if(P??=g(),!P)return;try{let $=N1();if($.length===0){if(!Z.preserveExistingOnEmpty)window.localStorage.removeItem(P);return}window.localStorage.setItem(P,JSON.stringify($))}catch{}}function QZ(Z,$){if(u()?.hasAttribute("data-plannotator-queued-send"))return;if(H.notes.length===0)return;if($==="enter"&&!j1())return;if(s)clearTimeout(s);s=window.setTimeout(()=>{s=null,I(),NZ(),l(),K(Z)},$==="button"?0:90)}function X1(Z){return Z.some(($)=>$ instanceof Element&&D1($))}function j1(){if(n())return!1;let Z=u(),$=Z?v1(V1(Z)):"";return Boolean($||HZ())}function D1(Z){let $=HZ();return Boolean($&&($===Z||$.contains(Z)))}function H1(Z){if(Z.key!=="Enter"||Z.shiftKey||Z.altKey||Z.isComposing)return!1;let $=Z.composedPath()[0],J=$ instanceof Element?$:null;if(!J||O0(J))return!1;let Y=u();if(!Y)return!1;return J===Y||Y.contains(J)}function u(){return w()}function V1(Z){return a(Z)}function U1(Z,$){let J=uZ(Z,$);if(J)Z.focus();return J}function W1(Z,$){let J=H.notes.find((Y)=>Y.id===Z);if(!J)return;H.activeNoteId=Z,H.notesMenuOpen=!1,EZ=Date.now()+900,K($),_1(J)}function _1(Z){let $=Q0(Z.range);if(!$)return;let J=$.getBoundingClientRect();if(J.width||J.height){let X=J.top-window.innerHeight*0.35;window.scrollBy({top:X,behavior:"smooth"});return}($.startContainer instanceof Element?$.startContainer:$.startContainer.parentElement)?.scrollIntoView({behavior:"smooth",block:"center"})}function Y0(Z){if(H.activeNoteId&&Date.now()>EZ)H.activeNoteId=null;p(Z)}function G0(Z){if(!H.activeNoteId)return;H.activeNoteId=null,EZ=0,p(Z)}function K1(){let Z=CSS.highlights;if(!Z)return;let $=H.notes.find((Y)=>Y.id===H.activeNoteId),J=H.notes.filter((Y)=>Y.id!==$?.id).map((Y)=>Y.range);Z.set(AZ,new Highlight(...J)),Z.set(PZ,$?new Highlight($.range):new Highlight)}function X0(Z){let $=Z.left;return window.innerWidth-Z.right>=$?"right":"left"}function B1(Z,$){if(Z==="right")return E($.right+t,12,window.innerWidth-WZ-12);return E($.left-WZ-t,12,window.innerWidth-WZ-12)}function Q1(Z,$){if($==="right")return E(Z.right+t,12,window.innerWidth-24-12);return E(Z.left-24-t,12,window.innerWidth-24-12)}function O1(Z){let $=Q0(Z);if(!$)return null;let J=$.getBoundingClientRect();if(!J.width&&!J.height)return null;return J}function M1(Z){return Array.from(Z.getClientRects()).filter((J)=>J.width||J.height).at(-1)??null}function Q0(Z){if(Z instanceof Range)return Z.cloneRange();try{let $=document.createRange();return $.setStart(Z.startContainer,Z.startOffset),$.setEnd(Z.endContainer,Z.endOffset),$}catch{return null}}function v(){if(FZ+=1,!b)return;window.cancelAnimationFrame(b),b=0}function F1(Z,$,J){v();let Y=FZ;b=window.requestAnimationFrame(()=>{if(b=0,Y!==FZ)return;let X=H.selectionDraft;if(!X||!H.draftEditorOpen||_0(X)!==$)return;if(Z.popoverLayer.querySelector("textarea[data-field='draft']")!==J||!J.isConnected)return;zZ(J),J.focus({preventScroll:!0});let D=J.value.length;J.setSelectionRange(D,D)})}function zZ(Z){if(!(Z instanceof HTMLTextAreaElement))return;let $=window.getComputedStyle(Z),J=parseFloat($.lineHeight)||18,Y=parseFloat($.paddingTop)+parseFloat($.paddingBottom),X=parseFloat($.borderTopWidth)+parseFloat($.borderBottomWidth),j=J*v0+Y+X;Z.style.height="0px";let D=Math.min(Z.scrollHeight,j);Z.style.height=`${D}px`,Z.style.overflowY=Z.scrollHeight>j?"auto":"hidden"}function p(Z){if(KZ)return;KZ=window.requestAnimationFrame(()=>{KZ=0,K(Z)})}function k(){if(v(),r+=1,L)clearTimeout(L),L=null;H.selectionDraft=null,H.draftEditorOpen=!1,H.draftText="",document.getSelection()?.removeAllRanges()}function e(){return[...H.notes].sort((Z,$)=>Z.createdAt-$.createdAt)}function j0(Z){return UZ(Z)}function LZ(Z){let $=Z.getAttribute(Z0);if(!$)$=C1(Z),Z.setAttribute(Z0,$);return $}function C1(Z){let $=tZ(Z);if($)return $;let Y=kZ().indexOf(Z),X=B(ZZ(Z)).slice(0,96);return`assistant-${Y}-${x1(X)}`}function kZ(){return rZ()}function O0(Z){let $=Z instanceof HTMLElement?Z:Z?.parentElement??null;if(!$)return!1;return Boolean($.closest(`#${c}`))}function M0(Z){try{return new StaticRange({startContainer:Z.startContainer,startOffset:Z.startOffset,endContainer:Z.endContainer,endOffset:Z.endOffset})}catch{return Z.cloneRange()}}function A1(Z,$){let J=document.createTreeWalker(Z,NodeFilter.SHOW_TEXT),Y=0,X=0,j=0;while(J.nextNode()){let D=J.currentNode,U=D.textContent?.length??0;if(D===$.startContainer)X=Y+$.startOffset;if(D===$.endContainer){j=Y+$.endOffset;break}Y+=U}if(j<X)j=X+$.toString().length;return{start:X,end:j}}function ZZ(Z){let $=document.createTreeWalker(Z,NodeFilter.SHOW_TEXT),J="";while($.nextNode())J+=$.currentNode.textContent??"";return J}function B(Z){return Z.replace(/\s+/g," ").trim()}function D0(Z,$){let J=B(Z);if(J.length<=$)return J;return`${J.slice(0,$-1)}...`}function E(Z,$,J){return Math.max($,Math.min(J,Z))}function OZ(Z){return Z.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;")}function P1(Z){let $=Z.shadow.activeElement;return($ instanceof HTMLTextAreaElement||$ instanceof HTMLInputElement)&&$.dataset.field==="draft"}function g(){return`${b0}${window.location.origin}${window.location.pathname}`}function R1(Z){try{let $=window.localStorage.getItem(Z);if(!$)return[];let J=JSON.parse($);if(!Array.isArray(J))return[];return J.flatMap((Y)=>{if(!E1(Y))return[];return[Y]})}catch{return[]}}function E1(Z){if(!Z||typeof Z!=="object")return!1;let $=Z;return typeof $.id==="string"&&typeof $.messageId==="string"&&typeof $.messageExcerpt==="string"&&typeof $.quote==="string"&&typeof $.comment==="string"&&typeof $.contextBefore==="string"&&typeof $.contextAfter==="string"&&($.startOffset===void 0||typeof $.startOffset==="number")&&($.endOffset===void 0||typeof $.endOffset==="number")&&typeof $.createdAt==="number"}function N1(){return e().map((Z)=>({id:Z.id,messageId:Z.messageId,messageExcerpt:Z.messageExcerpt,quote:Z.quote,comment:Z.comment,contextBefore:Z.contextBefore,contextAfter:Z.contextAfter,startOffset:Z.startOffset,endOffset:Z.endOffset,createdAt:Z.createdAt}))}function IZ(Z){if(S)return;S=window.requestAnimationFrame(()=>{S=0,z1(Z)})}function z1(Z){if(R.length===0){m(),K(Z);return}let $=new Map(H.notes.map((X)=>[X.id,X])),J=[],Y=!1;for(let X of R){if($.has(X.id))continue;let j=F0(X);if(!j){J.push(X);continue}if($.set(j.id,j),!A0(X)||j.quote!==X.quote)Y=!0}if(H.notes=Array.from($.values()).sort((X,j)=>X.createdAt-j.createdAt),R=J,K(Z),Y)T();if(R.length>0)L1(Z);else m()}function L1(Z){if(f||!document.body)return;f=new MutationObserver(()=>{IZ(Z)}),f.observe(document.body,{childList:!0,subtree:!0,characterData:!0})}function m(){if(S)window.cancelAnimationFrame(S),S=0;f?.disconnect(),f=null}function F0(Z){let $=k1(Z);if(!$)return null;let J=S1($,Z);if(!J)return null;return{...Z,messageId:LZ($),quote:J.quote,startOffset:J.startOffset,endOffset:J.endOffset,range:M0(J.range)}}function k1(Z){let $=I1(Z.messageId);if($)return $;let J=B(Z.messageExcerpt),Y=null,X=-1;for(let j of kZ()){let D=B(ZZ(j)),U=0;if(J&&D.includes(J))U+=J.length*2;if(Z.quote&&D.includes(B(Z.quote)))U+=Math.min(B(Z.quote).length,240);if(Z.contextBefore&&D.includes(B(Z.contextBefore)))U+=Z.contextBefore.length;if(Z.contextAfter&&D.includes(B(Z.contextAfter)))U+=Z.contextAfter.length;if(U>X)X=U,Y=j}return Y}function I1(Z){for(let $ of kZ())if(LZ($)===Z)return $;return null}function S1(Z,$){let J=ZZ(Z);if(!J)return null;if(A0($)){let j=U0(Z,$.startOffset,$.endOffset);if(j&&T1(j,$.quote))return{range:j,quote:B(j.toString())||$.quote,startOffset:$.startOffset,endOffset:$.endOffset}}let Y=h1(J,$);if(!Y)return null;let X=U0(Z,Y.start,Y.end);if(!X)return null;return{range:X,quote:B(X.toString())||$.quote,startOffset:Y.start,endOffset:Y.end}}function T1(Z,$){let J=x(Z.toString()),Y=x($);return Boolean(J)&&J===Y}function h1(Z,$){let J=B($.quote);if(!J)return null;let Y=J.split(" ").filter(Boolean),X=q1(Z);if(!X.text)return null;let j={contextBefore:B($.contextBefore),contextAfter:B($.contextAfter)},D=H0(X.text,J,Y,j," ");if(D)return V0(X,Z.length,D.start,D.end);let U=f1(Z),G=x($.quote);if(!U.text||!G)return null;let V=H0(U.text,G,Y,{contextBefore:x($.contextBefore),contextAfter:x($.contextAfter)},"");if(!V)return null;return V0(U,Z.length,V.start,V.end)}function H0(Z,$,J,Y,X){let j=null,D=0;while(D<Z.length){let U=Z.indexOf($,D);if(U===-1)break;let G=U+$.length,V=C0(Z,U,G,Y);if(!j||V>j.score)j={start:U,end:G,score:V};D=U+Math.max(1,$.length)}if(j)return j;return y1(Z,J,Y,X)}function C0(Z,$,J,Y){let X=B(Y.contextBefore),j=B(Y.contextAfter),D=Z.slice(Math.max(0,$-X.length),$),U=Z.slice(J,J+j.length);return w1(D,X)*2+b1(U,j)*2}function y1(Z,$,J,Y){if($.length===0)return null;let X=Math.min($.length,14),j=Math.min(X,3),D=null;for(let U=X;U>=j;U-=1){for(let G=0;G+U<=$.length;G+=1){let V=$.slice(G,G+U).join(Y),W=0;while(W<Z.length){let _=Z.indexOf(V,W);if(_===-1)break;let O=_+V.length,M=C0(Z,_,O,J)+V.length*4-G;if(!D||M>D.score)D={start:_,end:O,score:M};W=_+Math.max(1,V.length)}}if(D)return D}return null}function w1(Z,$){let J=0,Y=Z.length-1,X=$.length-1;while(Y>=0&&X>=0){if(Z[Y]!==$[X])break;J+=1,Y-=1,X-=1}return J}function b1(Z,$){let J=0,Y=Math.min(Z.length,$.length);while(J<Y){if(Z[J]!==$[J])break;J+=1}return J}function q1(Z){let $="",J=[],Y=!1,X=!1;for(let j=0;j<Z.length;j+=1){let D=Z[j];if(/\s/.test(D)){if(!Y||X)continue;$+=" ",J.push(j),X=!0;continue}$+=D,J.push(j),Y=!0,X=!1}if($.endsWith(" "))$=$.slice(0,-1),J.pop();return{text:$,rawByNormalized:J}}function f1(Z){let $="",J=[];for(let Y=0;Y<Z.length;Y+=1){let X=Z[Y];if(/\s/.test(X))continue;$+=X,J.push(Y)}return{text:$,rawByNormalized:J}}function V0(Z,$,J,Y){let X=Z.rawByNormalized[J],j=Y<Z.rawByNormalized.length?Z.rawByNormalized[Y]:$;if(typeof X!=="number")return null;return{start:X,end:Math.max(X+1,j)}}function U0(Z,$,J){if(J<=$)return null;let Y=document.createTreeWalker(Z,NodeFilter.SHOW_TEXT),X=0,j=null,D=null,U=0,G=0,V=null;while(Y.nextNode()){let _=Y.currentNode,O=_.textContent?.length??0,M=X+O;if(V=_,!j&&$<=M)j=_,U=E($-X,0,O);if(!D&&J<=M){D=_,G=E(J-X,0,O);break}X=M}if(!j)return null;if(!D){if(!V)return null;D=V,G=V.textContent?.length??0}if(j===D&&G<=U)return null;let W=document.createRange();return W.setStart(j,U),W.setEnd(D,G),W.collapsed?null:W}function A0(Z){return typeof Z.startOffset==="number"&&typeof Z.endOffset==="number"&&Z.endOffset>Z.startOffset}function W0(Z){return JSON.stringify(B(Z))}function v1(Z){return Z.replace(/\s+/g,"")}function x(Z){return Z.replace(/\s+/g,"")}function x1(Z){let $=5381;for(let J=0;J<Z.length;J+=1)$=($<<5)+$^Z.charCodeAt(J);return Math.abs($).toString(36)}function A(Z){if(!RZ)return;let $=document.getElementById(c);if($)$.dataset.reloadState=Z}function I(){if(H.actionFeedback="idle",q)clearTimeout(q),q=null}function p1(Z){I(),H.actionFeedback="inserted",q=window.setTimeout(()=>{H.actionFeedback="idle",q=null,K(Z)},x0)}function g1(){return new Promise((Z)=>window.requestAnimationFrame(()=>Z()))}})();
+`).trim();
+  }
+  async function insertPrompt(ui) {
+    if (!ensureAnnotationRoute())
+      return;
+    if (state.notes.length === 0 || state.actionFeedback === "loading") {
+      return;
+    }
+    const composer = findComposer();
+    if (!composer) {
+      state.actionError = "The composer is unavailable. Your notes are still saved here.";
+      render(ui);
+      return;
+    }
+    if (getComposerText(composer).trim() || hasComposerAttachments()) {
+      state.actionError = "Send or clear the current draft before inserting notes.";
+      render(ui);
+      return;
+    }
+    const route = getConversationStorageKey();
+    const prompt = buildPrompt();
+    state.actionError = "";
+    clearActionFeedback();
+    state.actionFeedback = "loading";
+    render(ui);
+    await nextPaint();
+    if (route !== getConversationStorageKey() || !composer.isConnected || findComposer() !== composer || getComposerText(composer).trim() || hasComposerAttachments()) {
+      clearActionFeedback();
+      state.actionError = "The conversation or draft changed. Your notes were kept.";
+      render(ui);
+      return;
+    }
+    if (!setComposerText(composer, prompt)) {
+      clearActionFeedback();
+      state.actionError = "Could not insert notes. Your notes were kept.";
+      render(ui);
+      return;
+    }
+    showInsertSuccess(ui);
+    render(ui);
+  }
+  function startConversationPersistence(ui) {
+    currentConversationKey = getConversationStorageKey();
+    if (conversationPollTimer)
+      return;
+    annotationRuntime()?.onMessage?.addListener((message) => {
+      const session = currentAnnotationSession();
+      if (message.type === ANNOTATION_CHANGED_TYPE && message.key === session.key)
+        refreshAnnotationSession(session);
+    });
+    conversationPollTimer = window.setInterval(() => syncAnnotationRoute(ui), CONVERSATION_POLL_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible")
+        refreshAnnotationSession(currentAnnotationSession());
+    });
+  }
+  function syncAnnotationRoute(ui) {
+    const nextKey = getConversationStorageKey();
+    if (nextKey === currentConversationKey)
+      return;
+    const previous = currentAnnotationSession();
+    if (state.selectionDraft && state.draftText.trim())
+      previous.draft = { selection: state.selectionDraft, text: state.draftText };
+    stopRestoreObserver();
+    pendingRestoreNotes = [];
+    clearActionFeedback();
+    clearSelectionDraft(false);
+    state.notes = [];
+    state.activeNoteId = null;
+    state.notesMenuOpen = false;
+    state.actionError = "";
+    currentConversationKey = nextKey;
+    const next = currentAnnotationSession();
+    if (next.draft) {
+      state.selectionDraft = next.draft.selection;
+      state.draftText = next.draft.text;
+      state.draftEditorOpen = true;
+    }
+    applyAnnotationSession(next);
+    render(ui);
+    loadPersistedConversationState(ui);
+  }
+  function ensureAnnotationRoute() {
+    if (!currentConversationKey) {
+      currentConversationKey = getConversationStorageKey();
+      return true;
+    }
+    if (currentConversationKey === getConversationStorageKey())
+      return true;
+    if (annotationUi)
+      syncAnnotationRoute(annotationUi);
+    return false;
+  }
+  function startDomRefreshObserver(ui) {
+    if (domRefreshObserver || !document.body)
+      return;
+    domRefreshObserver = new MutationObserver(() => {
+      if (pendingRestoreNotes.length > 0) {
+        scheduleRestorePendingNotes(ui);
+      }
+      if (state.notes.length > 0) {
+        scheduleRender(ui);
+      }
+    });
+    domRefreshObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+  async function loadPersistedConversationState(ui) {
+    annotationUi = ui;
+    currentConversationKey ??= getConversationStorageKey();
+    const session = currentAnnotationSession();
+    await loadAnnotationSession(session);
+    if (session.pending.size)
+      await flushAnnotationSession(session);
+  }
+  function schedulePersistedConversationState() {
+    if (persistTimer)
+      clearTimeout(persistTimer);
+    const session = currentAnnotationSession();
+    persistTimer = window.setTimeout(() => {
+      persistTimer = null;
+      flushAnnotationSession(session);
+    }, PERSIST_DEBOUNCE_MS);
+  }
+  async function flushPersistedConversationState() {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    await flushAnnotationSession(currentAnnotationSession());
+  }
+  function annotationRuntime() {
+    return globalThis.chrome?.runtime;
+  }
+  function currentAnnotationSession() {
+    const route = currentConversationKey ?? getConversationStorageKey();
+    let session = annotationSessions.get(route);
+    if (!session) {
+      session = { route, key: getAnnotationKey(route.slice(STORAGE_KEY_PREFIX.length)), notes: new Map, saved: new Map, pending: new Map, revision: -1, loaded: false, loading: null, flushing: null, error: "", migrationError: "", draft: null };
+      annotationSessions.set(route, session);
+    }
+    return session;
+  }
+  function allConversationNotes() {
+    const notes = new Map(currentAnnotationSession().notes);
+    for (const note of pendingRestoreNotes)
+      if (!notes.has(note.id))
+        notes.set(note.id, note);
+    for (const note of state.notes)
+      notes.set(note.id, serializeNote(note));
+    return Array.from(notes.values()).sort((a, b) => a.createdAt - b.createdAt);
+  }
+  function hasUnsavedAnnotationChanges() {
+    return Boolean(state.draftText.trim() || Array.from(annotationSessions.values()).some((session) => session.pending.size || session.draft?.text.trim() || !session.key && session.notes.size));
+  }
+  function applyAnnotationSession(session) {
+    if (session.route !== currentConversationKey || session.route !== getConversationStorageKey())
+      return;
+    const old = new Map(state.notes.map((note) => [note.id, note]));
+    state.notes = [];
+    pendingRestoreNotes = [];
+    for (const note of session.notes.values()) {
+      const restored = restorePersistedNote(note);
+      const previous = old.get(note.id);
+      if (restored)
+        state.notes.push(restored);
+      else if (previous)
+        state.notes.push({ ...previous, comment: note.comment });
+      else
+        pendingRestoreNotes.push(note);
+    }
+    if (annotationUi) {
+      if (pendingRestoreNotes.length)
+        scheduleRestorePendingNotes(annotationUi);
+      render(annotationUi);
+    }
+  }
+  function acceptAnnotationSnapshot(session, reply) {
+    if (reply.revision >= session.revision) {
+      session.revision = reply.revision;
+      session.saved = new Map(reply.notes.map((note) => [note.id, note]));
+    }
+    session.notes = new Map(session.saved);
+    for (const [id, mutation] of session.pending) {
+      if (mutation.action === "remove")
+        session.notes.delete(id);
+      else
+        session.notes.set(id, mutation.note);
+    }
+    applyAnnotationSession(session);
+  }
+  async function annotationRequest(session, action, extra = {}) {
+    if (!session.key)
+      throw new Error("Open a saved conversation to save these notes.");
+    const runtime = annotationRuntime();
+    if (!runtime?.sendMessage)
+      throw new Error("Extension storage is unavailable. Keep this tab open and retry saving.");
+    const reply = await runtime.sendMessage({ type: ANNOTATION_MESSAGE_TYPE, key: session.key, action, ...extra });
+    if (!reply?.ok || !Array.isArray(reply.notes) || typeof reply.revision !== "number")
+      throw new Error(reply?.error || "The save was not confirmed. Keep this tab open and retry saving.");
+    return { notes: reply.notes, revision: reply.revision };
+  }
+  function annotationFailure(session, error) {
+    session.error = `Notes not saved: ${error instanceof Error ? error.message : String(error)}`;
+    applyAnnotationSession(session);
+  }
+  async function loadAnnotationSession(session) {
+    if (!session.key) {
+      let raw = null;
+      session.migrationError = "";
+      try {
+        raw = window.localStorage.getItem(session.route);
+        if (raw) {
+          const legacy = JSON.parse(raw);
+          if (!Array.isArray(legacy) || !legacy.every(isPersistedNoteItem))
+            throw new Error("The original notes could not be read.");
+          for (const note of legacy) {
+            if (!session.notes.has(note.id) && !session.pending.has(note.id))
+              session.notes.set(note.id, note);
+          }
+        }
+      } catch {
+        if (raw)
+          session.migrationError = "Existing notes could not be read. Their original copy has been kept.";
+      }
+      session.error = session.notes.size || session.pending.size ? "This chat is not saved. These notes are not saved in extension storage; keep this tab open." : "";
+      applyAnnotationSession(session);
+      return;
+    }
+    if (session.loading)
+      return session.loading;
+    session.loading = Promise.resolve().then(async () => {
+      try {
+        let raw = null;
+        let legacy = [];
+        session.migrationError = "";
+        try {
+          raw = window.localStorage.getItem(session.route);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed) || !parsed.every(isPersistedNoteItem))
+              throw new Error("The original notes could not be read.");
+            legacy = parsed;
+            for (const note of legacy)
+              if (!session.notes.has(note.id))
+                session.notes.set(note.id, note);
+            applyAnnotationSession(session);
+          }
+        } catch (error) {
+          raw = null;
+          session.migrationError = `Legacy notes were kept but could not be imported: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        const reply = await annotationRequest(session, raw ? "import" : "read", raw ? { notes: legacy } : {});
+        acceptAnnotationSnapshot(session, reply);
+        if (raw && window.localStorage.getItem(session.route) === raw)
+          window.localStorage.removeItem(session.route);
+        session.loaded = true;
+        session.error = "";
+      } catch (error) {
+        annotationFailure(session, error);
+      }
+    }).finally(() => {
+      session.loading = null;
+      applyAnnotationSession(session);
+    });
+    return session.loading;
+  }
+  async function refreshAnnotationSession(session) {
+    if (!session.loaded) {
+      await loadAnnotationSession(session);
+      return;
+    }
+    try {
+      acceptAnnotationSnapshot(session, await annotationRequest(session, "read"));
+    } catch (error) {
+      annotationFailure(session, error);
+    }
+  }
+  function queueAnnotationMutation(mutation, immediate = false) {
+    const session = currentAnnotationSession();
+    const id = mutation.action === "remove" ? mutation.id : mutation.note.id;
+    session.pending.set(id, mutation);
+    if (mutation.action === "remove")
+      session.notes.delete(id);
+    else
+      session.notes.set(id, mutation.note);
+    session.error = "";
+    if (immediate)
+      flushAnnotationSession(session);
+    else
+      schedulePersistedConversationState();
+  }
+  async function flushAnnotationSession(session) {
+    if (session.flushing)
+      return session.flushing;
+    session.flushing = (async () => {
+      if (!session.loaded)
+        await loadAnnotationSession(session);
+      if (!session.loaded)
+        return;
+      try {
+        while (session.pending.size) {
+          const action = session.pending.values().next().value.action;
+          const batch = Array.from(session.pending.entries()).filter(([, mutation]) => mutation.action === action);
+          const extra = action === "remove" ? { ids: batch.map(([id]) => id) } : { notes: batch.map(([, mutation]) => mutation.note) };
+          const reply = await annotationRequest(session, action, extra);
+          for (const [id, mutation] of batch)
+            if (session.pending.get(id) === mutation)
+              session.pending.delete(id);
+          acceptAnnotationSnapshot(session, reply);
+          session.error = "";
+        }
+      } catch (error) {
+        annotationFailure(session, error);
+      }
+    })().finally(() => {
+      session.flushing = null;
+      applyAnnotationSession(session);
+    });
+    return session.flushing;
+  }
+  async function retryAnnotationSave() {
+    if (!ensureAnnotationRoute())
+      return;
+    const session = currentAnnotationSession();
+    session.error = "";
+    await loadAnnotationSession(session);
+    await flushAnnotationSession(session);
+    applyAnnotationSession(session);
+  }
+  function findComposer() {
+    return findQueueComposer();
+  }
+  function getComposerText(element) {
+    return readComposer(element);
+  }
+  function setComposerText(element, value) {
+    const inserted = writeComposer(element, value);
+    if (inserted)
+      element.focus();
+    return inserted;
+  }
+  function jumpToNote(noteId, ui) {
+    const note = state.notes.find((entry) => entry.id === noteId);
+    if (!note)
+      return;
+    state.activeNoteId = noteId;
+    state.notesMenuOpen = false;
+    suppressActiveScrollClearUntil = Date.now() + 900;
+    render(ui);
+    scrollNoteIntoView(note);
+  }
+  function scrollNoteIntoView(note) {
+    const range = toLiveRange(note.range);
+    if (!range)
+      return;
+    const rect = range.getBoundingClientRect();
+    if (rect.width || rect.height) {
+      const targetY = rect.top - window.innerHeight * 0.35;
+      window.scrollBy({
+        top: targetY,
+        behavior: "smooth"
+      });
+      return;
+    }
+    const container = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+    container?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  function handleViewportScroll(ui) {
+    if (state.activeNoteId && Date.now() > suppressActiveScrollClearUntil) {
+      state.activeNoteId = null;
+    }
+    scheduleRender(ui);
+  }
+  function clearActiveNoteFromUserScroll(ui) {
+    if (!state.activeNoteId)
+      return;
+    state.activeNoteId = null;
+    suppressActiveScrollClearUntil = 0;
+    scheduleRender(ui);
+  }
+  function renderHighlights() {
+    const cssHighlights = CSS.highlights;
+    if (!cssHighlights)
+      return;
+    const activeNote = state.notes.find((note) => note.id === state.activeNoteId);
+    const baseRanges = state.notes.filter((note) => note.id !== activeNote?.id).map((note) => note.range);
+    cssHighlights.set(HIGHLIGHT_NAME, new Highlight(...baseRanges));
+    cssHighlights.set(ACTIVE_HIGHLIGHT_NAME, activeNote ? new Highlight(activeNote.range) : new Highlight);
+  }
+  function pickSide(rect) {
+    const spaceLeft = rect.left;
+    const spaceRight = window.innerWidth - rect.right;
+    return spaceRight >= spaceLeft ? "right" : "left";
+  }
+  function getPopoverLeft(side, rect) {
+    if (side === "right") {
+      return clamp(rect.right + POPOVER_GAP, 12, window.innerWidth - POPOVER_WIDTH - 12);
+    }
+    return clamp(rect.left - POPOVER_WIDTH - POPOVER_GAP, 12, window.innerWidth - POPOVER_WIDTH - 12);
+  }
+  function getDraftTriggerX(rect, side) {
+    if (side === "right") {
+      return clamp(rect.right + POPOVER_GAP, 12, window.innerWidth - 24 - 12);
+    }
+    return clamp(rect.left - 24 - POPOVER_GAP, 12, window.innerWidth - 24 - 12);
+  }
+  function getRangeRect(rangeLike) {
+    const range = toLiveRange(rangeLike);
+    if (!range)
+      return null;
+    const rect = range.getBoundingClientRect();
+    if (!rect.width && !rect.height)
+      return null;
+    return rect;
+  }
+  function getSelectionTailRect(range) {
+    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width || rect.height);
+    return rects.at(-1) ?? null;
+  }
+  function toLiveRange(rangeLike) {
+    if (rangeLike instanceof Range) {
+      return rangeLike.cloneRange();
+    }
+    try {
+      const range = document.createRange();
+      range.setStart(rangeLike.startContainer, rangeLike.startOffset);
+      range.setEnd(rangeLike.endContainer, rangeLike.endOffset);
+      return range;
+    } catch {
+      return null;
+    }
+  }
+  function cancelDraftFocus() {
+    draftFocusVersion += 1;
+    if (!draftFocusFrame)
+      return;
+    window.cancelAnimationFrame(draftFocusFrame);
+    draftFocusFrame = 0;
+  }
+  function focusDraftField(ui, draftKey, field) {
+    cancelDraftFocus();
+    const version = draftFocusVersion;
+    draftFocusFrame = window.requestAnimationFrame(() => {
+      draftFocusFrame = 0;
+      if (version !== draftFocusVersion)
+        return;
+      const draft = state.selectionDraft;
+      if (!draft || !state.draftEditorOpen || getSelectionDraftKey(draft) !== draftKey) {
+        return;
+      }
+      const currentField = ui.popoverLayer.querySelector("textarea[data-field='draft']");
+      if (currentField !== field || !field.isConnected)
+        return;
+      autosizeNoteField(field);
+      field.focus({ preventScroll: true });
+      const caret = field.value.length;
+      field.setSelectionRange(caret, caret);
+    });
+  }
+  function autosizeNoteField(field) {
+    if (!(field instanceof HTMLTextAreaElement))
+      return;
+    const computed = window.getComputedStyle(field);
+    const lineHeight = parseFloat(computed.lineHeight) || 18;
+    const padding = parseFloat(computed.paddingTop) + parseFloat(computed.paddingBottom);
+    const border = parseFloat(computed.borderTopWidth) + parseFloat(computed.borderBottomWidth);
+    const maxHeight = lineHeight * NOTE_MAX_ROWS + padding + border;
+    field.style.height = "0px";
+    const nextHeight = Math.min(field.scrollHeight, maxHeight);
+    field.style.height = `${nextHeight}px`;
+    field.style.overflowY = field.scrollHeight > maxHeight ? "auto" : "hidden";
+  }
+  function scheduleRender(ui) {
+    if (renderFrame)
+      return;
+    renderFrame = window.requestAnimationFrame(() => {
+      renderFrame = 0;
+      render(ui);
+    });
+  }
+  function clearSelectionDraft(forgetStored = true) {
+    if (forgetStored)
+      currentAnnotationSession().draft = null;
+    cancelDraftFocus();
+    selectionVersion += 1;
+    if (selectionSettleTimer) {
+      clearTimeout(selectionSettleTimer);
+      selectionSettleTimer = null;
+    }
+    state.selectionDraft = null;
+    state.draftEditorOpen = false;
+    state.draftText = "";
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+  }
+  function getOrderedNotes() {
+    return [...state.notes].sort((a, b) => a.createdAt - b.createdAt);
+  }
+  function findAssistantMessage(node) {
+    return findAssistantMessageElement(node);
+  }
+  function ensureMessageId(message) {
+    let id = message.getAttribute(MESSAGE_ID_ATTR);
+    if (!id) {
+      id = buildStableMessageId(message);
+      message.setAttribute(MESSAGE_ID_ATTR, id);
+    }
+    return id;
+  }
+  function buildStableMessageId(message) {
+    const provided = getAssistantMessageId(message);
+    if (provided)
+      return provided;
+    const assistantMessages = getAssistantMessages();
+    const index = assistantMessages.indexOf(message);
+    const excerpt = collapseWhitespace(getNodeText(message)).slice(0, 96);
+    return `assistant-${index}-${hashText(excerpt)}`;
+  }
+  function getAssistantMessages() {
+    return getAssistantMessageElements();
+  }
+  function isInsideRoot(node) {
+    const element = node instanceof HTMLElement ? node : node?.parentElement ?? null;
+    if (!element)
+      return false;
+    return Boolean(element.closest(`#${ROOT_ID}`));
+  }
+  function createStableRange(range) {
+    try {
+      return new StaticRange({
+        startContainer: range.startContainer,
+        startOffset: range.startOffset,
+        endContainer: range.endContainer,
+        endOffset: range.endOffset
+      });
+    } catch {
+      return range.cloneRange();
+    }
+  }
+  function getOffsetsWithin(container, range) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let offset = 0;
+    let start = 0;
+    let end = 0;
+    while (walker.nextNode()) {
+      const textNode = walker.currentNode;
+      const textLength = textNode.textContent?.length ?? 0;
+      if (textNode === range.startContainer) {
+        start = offset + range.startOffset;
+      }
+      if (textNode === range.endContainer) {
+        end = offset + range.endOffset;
+        break;
+      }
+      offset += textLength;
+    }
+    if (end < start) {
+      end = start + range.toString().length;
+    }
+    return { start, end };
+  }
+  function getNodeText(container) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let text = "";
+    while (walker.nextNode()) {
+      text += walker.currentNode.textContent ?? "";
+    }
+    return text;
+  }
+  function collapseWhitespace(value) {
+    return value.replace(/\s+/g, " ").trim();
+  }
+  function truncateInline(value, maxLength) {
+    const trimmed = collapseWhitespace(value);
+    if (trimmed.length <= maxLength)
+      return trimmed;
+    return `${trimmed.slice(0, maxLength - 1)}...`;
+  }
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+  function escapeHtml(value) {
+    return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  }
+  function isDraftInputFocused(ui) {
+    const active = ui.shadow.activeElement;
+    return (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) && active.dataset.field === "draft";
+  }
+  function getConversationStorageKey() {
+    return `${STORAGE_KEY_PREFIX}${window.location.origin}${window.location.pathname}`;
+  }
+  function isPersistedNoteItem(value) {
+    if (!value || typeof value !== "object")
+      return false;
+    const candidate = value;
+    return typeof candidate.id === "string" && typeof candidate.messageId === "string" && typeof candidate.messageExcerpt === "string" && typeof candidate.quote === "string" && typeof candidate.comment === "string" && typeof candidate.contextBefore === "string" && typeof candidate.contextAfter === "string" && (candidate.startOffset === undefined || typeof candidate.startOffset === "number") && (candidate.endOffset === undefined || typeof candidate.endOffset === "number") && typeof candidate.createdAt === "number";
+  }
+  function serializeNote(note) {
+    return {
+      id: note.id,
+      messageId: note.messageId,
+      messageExcerpt: note.messageExcerpt,
+      quote: note.quote,
+      comment: note.comment,
+      contextBefore: note.contextBefore,
+      contextAfter: note.contextAfter,
+      startOffset: note.startOffset,
+      endOffset: note.endOffset,
+      createdAt: note.createdAt
+    };
+  }
+  function scheduleRestorePendingNotes(ui) {
+    if (restoreFrame)
+      return;
+    restoreFrame = window.requestAnimationFrame(() => {
+      restoreFrame = 0;
+      restorePendingNotes(ui);
+    });
+  }
+  function restorePendingNotes(ui) {
+    if (pendingRestoreNotes.length === 0) {
+      stopRestoreObserver();
+      render(ui);
+      return;
+    }
+    const nextNotes = new Map(state.notes.map((note) => [note.id, note]));
+    const unresolved = [];
+    let upgradedPersistedState = false;
+    for (const persisted of pendingRestoreNotes) {
+      if (nextNotes.has(persisted.id))
+        continue;
+      const restored = restorePersistedNote(persisted);
+      if (!restored) {
+        unresolved.push(persisted);
+        continue;
+      }
+      nextNotes.set(restored.id, restored);
+      if (!hasStoredOffsets(persisted) || restored.quote !== persisted.quote) {
+        upgradedPersistedState = true;
+      }
+    }
+    state.notes = Array.from(nextNotes.values()).sort((a, b) => a.createdAt - b.createdAt);
+    pendingRestoreNotes = unresolved;
+    render(ui);
+    if (pendingRestoreNotes.length > 0) {
+      ensureRestoreObserver(ui);
+    } else {
+      stopRestoreObserver();
+    }
+  }
+  function ensureRestoreObserver(ui) {
+    if (restoreObserver || !document.body)
+      return;
+    restoreObserver = new MutationObserver(() => {
+      scheduleRestorePendingNotes(ui);
+    });
+    restoreObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+  function stopRestoreObserver() {
+    if (restoreFrame) {
+      window.cancelAnimationFrame(restoreFrame);
+      restoreFrame = 0;
+    }
+    restoreObserver?.disconnect();
+    restoreObserver = null;
+  }
+  function restorePersistedNote(persisted) {
+    const message = findMessageForPersistedNote(persisted);
+    if (!message)
+      return null;
+    const restored = findPersistedSelectionInMessage(message, persisted);
+    if (!restored)
+      return null;
+    return {
+      ...persisted,
+      messageId: ensureMessageId(message),
+      quote: restored.quote,
+      startOffset: restored.startOffset,
+      endOffset: restored.endOffset,
+      range: createStableRange(restored.range)
+    };
+  }
+  function findMessageForPersistedNote(note) {
+    const direct = findAssistantMessageById(note.messageId);
+    if (direct)
+      return direct;
+    const noteExcerpt = collapseWhitespace(note.messageExcerpt);
+    let bestMatch = null;
+    let bestScore = -1;
+    for (const message of getAssistantMessages()) {
+      const text = collapseWhitespace(getNodeText(message));
+      let score = 0;
+      if (noteExcerpt && text.includes(noteExcerpt))
+        score += noteExcerpt.length * 2;
+      if (note.quote && text.includes(collapseWhitespace(note.quote))) {
+        score += Math.min(collapseWhitespace(note.quote).length, 240);
+      }
+      if (note.contextBefore && text.includes(collapseWhitespace(note.contextBefore))) {
+        score += note.contextBefore.length;
+      }
+      if (note.contextAfter && text.includes(collapseWhitespace(note.contextAfter))) {
+        score += note.contextAfter.length;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = message;
+      }
+    }
+    return bestMatch;
+  }
+  function findAssistantMessageById(messageId2) {
+    for (const message of getAssistantMessages()) {
+      if (ensureMessageId(message) === messageId2) {
+        return message;
+      }
+    }
+    return null;
+  }
+  function findPersistedSelectionInMessage(message, note) {
+    const text = getNodeText(message);
+    if (!text)
+      return null;
+    if (hasStoredOffsets(note)) {
+      const range2 = createRangeFromOffsets(message, note.startOffset, note.endOffset);
+      if (range2 && isRecoveredRangeMatch(range2, note.quote)) {
+        return {
+          range: range2,
+          quote: collapseWhitespace(range2.toString()) || note.quote,
+          startOffset: note.startOffset,
+          endOffset: note.endOffset
+        };
+      }
+    }
+    const offsets = findPersistedOffsets(text, note);
+    if (!offsets)
+      return null;
+    const range = createRangeFromOffsets(message, offsets.start, offsets.end);
+    if (!range)
+      return null;
+    return {
+      range,
+      quote: collapseWhitespace(range.toString()) || note.quote,
+      startOffset: offsets.start,
+      endOffset: offsets.end
+    };
+  }
+  function isRecoveredRangeMatch(range, quote) {
+    const recovered = stripWhitespace(range.toString());
+    const expected = stripWhitespace(quote);
+    return Boolean(recovered) && recovered === expected;
+  }
+  function findPersistedOffsets(rawText, note) {
+    const normalizedQuote = collapseWhitespace(note.quote);
+    if (!normalizedQuote)
+      return null;
+    const normalizedTokens = normalizedQuote.split(" ").filter(Boolean);
+    const index = buildNormalizedTextIndex(rawText);
+    if (!index.text)
+      return null;
+    const collapsedNote = {
+      contextBefore: collapseWhitespace(note.contextBefore),
+      contextAfter: collapseWhitespace(note.contextAfter)
+    };
+    const collapsedBest = findBestPersistedOffsetCandidate(index.text, normalizedQuote, normalizedTokens, collapsedNote, " ");
+    if (collapsedBest) {
+      return toRawOffsets(index, rawText.length, collapsedBest.start, collapsedBest.end);
+    }
+    const compactIndex = buildWhitespaceFreeTextIndex(rawText);
+    const compactQuote = stripWhitespace(note.quote);
+    if (!compactIndex.text || !compactQuote)
+      return null;
+    const compactBest = findBestPersistedOffsetCandidate(compactIndex.text, compactQuote, normalizedTokens, {
+      contextBefore: stripWhitespace(note.contextBefore),
+      contextAfter: stripWhitespace(note.contextAfter)
+    }, "");
+    if (!compactBest)
+      return null;
+    return toRawOffsets(compactIndex, rawText.length, compactBest.start, compactBest.end);
+  }
+  function findBestPersistedOffsetCandidate(normalizedText, normalizedQuote, quoteTokens, note, fragmentJoiner) {
+    let best = null;
+    let searchFrom = 0;
+    while (searchFrom < normalizedText.length) {
+      const start = normalizedText.indexOf(normalizedQuote, searchFrom);
+      if (start === -1)
+        break;
+      const end = start + normalizedQuote.length;
+      const score = scorePersistedOffsetCandidate(normalizedText, start, end, note);
+      if (!best || score > best.score) {
+        best = { start, end, score };
+      }
+      searchFrom = start + Math.max(1, normalizedQuote.length);
+    }
+    if (best)
+      return best;
+    return findPersistedOffsetsFromQuoteFragments(normalizedText, quoteTokens, note, fragmentJoiner);
+  }
+  function scorePersistedOffsetCandidate(normalizedText, start, end, note) {
+    const before = collapseWhitespace(note.contextBefore);
+    const after = collapseWhitespace(note.contextAfter);
+    const beforeWindow = normalizedText.slice(Math.max(0, start - before.length), start);
+    const afterWindow = normalizedText.slice(end, end + after.length);
+    return countMatchingSuffix(beforeWindow, before) * 2 + countMatchingPrefix(afterWindow, after) * 2;
+  }
+  function findPersistedOffsetsFromQuoteFragments(normalizedText, quoteTokens, note, joiner) {
+    if (quoteTokens.length === 0)
+      return null;
+    const maxWindow = Math.min(quoteTokens.length, 14);
+    const minWindow = Math.min(maxWindow, 3);
+    let best = null;
+    for (let windowSize = maxWindow;windowSize >= minWindow; windowSize -= 1) {
+      for (let tokenStart = 0;tokenStart + windowSize <= quoteTokens.length; tokenStart += 1) {
+        const fragment = quoteTokens.slice(tokenStart, tokenStart + windowSize).join(joiner);
+        let searchFrom = 0;
+        while (searchFrom < normalizedText.length) {
+          const start = normalizedText.indexOf(fragment, searchFrom);
+          if (start === -1)
+            break;
+          const end = start + fragment.length;
+          const score = scorePersistedOffsetCandidate(normalizedText, start, end, note) + fragment.length * 4 - tokenStart;
+          if (!best || score > best.score) {
+            best = { start, end, score };
+          }
+          searchFrom = start + Math.max(1, fragment.length);
+        }
+      }
+      if (best) {
+        return best;
+      }
+    }
+    return null;
+  }
+  function countMatchingSuffix(actual, expected) {
+    let matched = 0;
+    let actualIndex = actual.length - 1;
+    let expectedIndex = expected.length - 1;
+    while (actualIndex >= 0 && expectedIndex >= 0) {
+      if (actual[actualIndex] !== expected[expectedIndex])
+        break;
+      matched += 1;
+      actualIndex -= 1;
+      expectedIndex -= 1;
+    }
+    return matched;
+  }
+  function countMatchingPrefix(actual, expected) {
+    let matched = 0;
+    const length = Math.min(actual.length, expected.length);
+    while (matched < length) {
+      if (actual[matched] !== expected[matched])
+        break;
+      matched += 1;
+    }
+    return matched;
+  }
+  function buildNormalizedTextIndex(rawText) {
+    let text = "";
+    const rawByNormalized = [];
+    let wroteNonWhitespace = false;
+    let previousWasWhitespace = false;
+    for (let index = 0;index < rawText.length; index += 1) {
+      const character = rawText[index];
+      if (/\s/.test(character)) {
+        if (!wroteNonWhitespace || previousWasWhitespace)
+          continue;
+        text += " ";
+        rawByNormalized.push(index);
+        previousWasWhitespace = true;
+        continue;
+      }
+      text += character;
+      rawByNormalized.push(index);
+      wroteNonWhitespace = true;
+      previousWasWhitespace = false;
+    }
+    if (text.endsWith(" ")) {
+      text = text.slice(0, -1);
+      rawByNormalized.pop();
+    }
+    return { text, rawByNormalized };
+  }
+  function buildWhitespaceFreeTextIndex(rawText) {
+    let text = "";
+    const rawByNormalized = [];
+    for (let index = 0;index < rawText.length; index += 1) {
+      const character = rawText[index];
+      if (/\s/.test(character)) {
+        continue;
+      }
+      text += character;
+      rawByNormalized.push(index);
+    }
+    return { text, rawByNormalized };
+  }
+  function toRawOffsets(index, rawTextLength, normalizedStart, normalizedEnd) {
+    const rawStart = index.rawByNormalized[normalizedStart];
+    const rawEnd = normalizedEnd < index.rawByNormalized.length ? index.rawByNormalized[normalizedEnd] : rawTextLength;
+    if (typeof rawStart !== "number")
+      return null;
+    return {
+      start: rawStart,
+      end: Math.max(rawStart + 1, rawEnd)
+    };
+  }
+  function createRangeFromOffsets(container, start, end) {
+    if (end <= start)
+      return null;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let totalOffset = 0;
+    let startNode = null;
+    let endNode = null;
+    let startOffset = 0;
+    let endOffset = 0;
+    let lastTextNode = null;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const length = node.textContent?.length ?? 0;
+      const nextOffset = totalOffset + length;
+      lastTextNode = node;
+      if (!startNode && start <= nextOffset) {
+        startNode = node;
+        startOffset = clamp(start - totalOffset, 0, length);
+      }
+      if (!endNode && end <= nextOffset) {
+        endNode = node;
+        endOffset = clamp(end - totalOffset, 0, length);
+        break;
+      }
+      totalOffset = nextOffset;
+    }
+    if (!startNode)
+      return null;
+    if (!endNode) {
+      if (!lastTextNode)
+        return null;
+      endNode = lastTextNode;
+      endOffset = lastTextNode.textContent?.length ?? 0;
+    }
+    if (startNode === endNode && endOffset <= startOffset) {
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    return range.collapsed ? null : range;
+  }
+  function hasStoredOffsets(note) {
+    return typeof note.startOffset === "number" && typeof note.endOffset === "number" && note.endOffset > note.startOffset;
+  }
+  function formatPromptValue(value) {
+    return JSON.stringify(collapseWhitespace(value));
+  }
+  function stripWhitespace(value) {
+    return value.replace(/\s+/g, "");
+  }
+  function hashText(value) {
+    let hash2 = 5381;
+    for (let index = 0;index < value.length; index += 1) {
+      hash2 = (hash2 << 5) + hash2 ^ value.charCodeAt(index);
+    }
+    return Math.abs(hash2).toString(36);
+  }
+  function setDevReloadState(value) {
+    if (false)
+      ;
+    const host = document.getElementById(ROOT_ID);
+    if (host) {
+      host.dataset.reloadState = value;
+    }
+  }
+  function clearActionFeedback() {
+    state.actionFeedback = "idle";
+    if (actionFeedbackTimer) {
+      clearTimeout(actionFeedbackTimer);
+      actionFeedbackTimer = null;
+    }
+  }
+  function showInsertSuccess(ui) {
+    clearActionFeedback();
+    state.actionFeedback = "inserted";
+    actionFeedbackTimer = window.setTimeout(() => {
+      state.actionFeedback = "idle";
+      actionFeedbackTimer = null;
+      render(ui);
+    }, ACTION_SUCCESS_MS);
+  }
+  function nextPaint() {
+    return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
+})();
 
-//# debugId=7B0FFF6A3D908AB164756E2164756E21
+//# debugId=3EE48CBB83888C1364756E2164756E21
 //# sourceMappingURL=content.js.map

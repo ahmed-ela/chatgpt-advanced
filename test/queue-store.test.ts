@@ -292,6 +292,99 @@ describe("persistent AI conversation queue", () => {
     expect((await staleTab.apply(request("claim", { afterUserMessageId: "generating-user-id" }), ownerA, start + 10_004)).claimed?.id).toBe("first-pending");
   });
 
+  test("Gemini anchor promotion persists across reopen and still requires the exact completed turn to claim", async () => {
+    const geminiKey = "gemini:anchor-chat";
+    const indexed = "gemini:user:user-query-content-11:abc123";
+    const stable = "gemini:user:23845300d6e6d28e";
+    await store.apply(request("enqueue", { key: geminiKey, id: "a", text: "Follow up", afterUserMessageId: indexed }), ownerA, start);
+    await store.apply(request("pause", { key: geminiKey, paused: true }), ownerA, start);
+    const before = (await store.apply(request("read", { key: geminiKey }), ownerA, start)).state;
+    const promoted = await store.apply(request("anchor", { key: geminiKey, userMessageId: indexed, afterUserMessageId: stable }), ownerB, start);
+    expect(promoted.changed).toBe(true);
+    expect(promoted.state).toEqual({ ...before, revision: before.revision + 1, lastCompletedUserMessageId: stable });
+    await store.close();
+    const reopened = newStore();
+    expect((await reopened.apply(request("claim", { key: geminiKey, afterUserMessageId: stable }), ownerB, start + 1)).claimed).toBeUndefined();
+    await reopened.apply(request("pause", { key: geminiKey, paused: false }), ownerB, start + 2);
+    for (const afterUserMessageId of [undefined, indexed, "gemini:user:aaaaaaaaaaaaaaaa"]) {
+      expect((await reopened.apply(request("claim", { key: geminiKey, afterUserMessageId }), ownerB, start + 3)).claimed).toBeUndefined();
+    }
+    expect((await reopened.apply(request("claim", { key: geminiKey, afterUserMessageId: stable }), ownerB, start + 4)).claimed?.id).toBe("a");
+  });
+
+  test("concurrent Gemini anchor promotions compare the old value and make a stale replacement a no-op", async () => {
+    const geminiKey = "gemini:anchor-chat";
+    const indexed = "gemini:user:user-query-content-11:abc123";
+    const replacements = ["gemini:user:23845300d6e6d28e", "gemini:user:aaaaaaaaaaaaaaaa"];
+    const enqueued = await store.apply(request("enqueue", { key: geminiKey, id: "a", text: "Follow up", afterUserMessageId: indexed }), ownerA, start);
+    const other = newStore();
+    const results = await Promise.all(replacements.map((stable, index) => (index ? other : store).apply(
+      request("anchor", { key: geminiKey, userMessageId: indexed, afterUserMessageId: stable }), index ? ownerB : ownerA, start,
+    )));
+    expect(results.filter(result => result.changed)).toHaveLength(1);
+    const winner = results.find(result => result.changed)!.state;
+    expect(replacements).toContain(winner.lastCompletedUserMessageId!);
+    expect(winner.revision).toBe(enqueued.state.revision + 1);
+    const stale = results.find(result => !result.changed)!;
+    expect(stale.state).toEqual(winner);
+    expect(stale.claimed).toBeUndefined();
+    expect((await other.apply(request("read", { key: geminiKey }), ownerB, start)).state).toEqual(winner);
+  });
+
+  test("waiting-item anchor promotion stays in its slot and cannot complete or bypass the next-message barrier", async () => {
+    const geminiKey = "gemini:anchor-chat";
+    const prior = "gemini:user:user-query-content-10:priorhash";
+    const indexed = "gemini:user:user-query-content-11:abc123";
+    const stable = "gemini:user:23845300d6e6d28e";
+    await store.apply(request("enqueue", { key: geminiKey, id: "a", text: "First", afterUserMessageId: prior }), ownerA, start);
+    await store.apply(request("enqueue", { key: geminiKey, id: "b", text: "Second" }), ownerA, start);
+    await store.apply(request("claim", { key: geminiKey, afterUserMessageId: prior }), ownerA, start);
+    await store.apply(request("attempt", { key: geminiKey, id: "a" }), ownerA, start);
+    await store.apply(request("ack", { key: geminiKey, id: "a", userMessageId: indexed }), ownerA, start);
+    await store.apply(request("pause", { key: geminiKey, paused: true }), ownerA, start);
+    const before = (await store.apply(request("read", { key: geminiKey }), ownerA, start)).state;
+    for (const id of [undefined, "b", "missing"]) {
+      const ignored = await store.apply(request("anchor", { key: geminiKey, id, userMessageId: indexed, afterUserMessageId: stable }), ownerB, start);
+      expect(ignored.changed).toBe(false);
+      expect(ignored.state).toEqual(before);
+    }
+    const promoted = await store.apply(request("anchor", { key: geminiKey, id: "a", userMessageId: indexed, afterUserMessageId: stable }), ownerB, start);
+    expect(promoted.state).toEqual({ ...before, revision: before.revision + 1,
+      items: [{ ...before.items[0]!, userMessageId: stable }, before.items[1]!] });
+    expect((await store.apply(request("anchor", { key: geminiKey, id: "a", userMessageId: indexed, afterUserMessageId: stable }), ownerA, start)).changed).toBe(false);
+    await store.apply(request("pause", { key: geminiKey, paused: false }), ownerA, start);
+    expect((await store.apply(request("claim", { key: geminiKey, afterUserMessageId: prior }), ownerB, start)).claimed).toBeUndefined();
+    await expect(store.apply(request("complete", { key: geminiKey, id: "a", userMessageId: indexed }), ownerB, start)).rejects.toThrow("does not match");
+    const completed = await store.apply(request("complete", { key: geminiKey, id: "a", userMessageId: stable }), ownerB, start);
+    expect(completed.state.lastCompletedUserMessageId).toBe(stable);
+    expect(completed.state.items.map(item => item.id)).toEqual(["b"]);
+    expect((await store.apply(request("claim", { key: geminiKey, afterUserMessageId: prior }), ownerB, start)).claimed).toBeUndefined();
+    expect((await store.apply(request("claim", { key: geminiKey, afterUserMessageId: stable }), ownerB, start)).claimed?.id).toBe("b");
+  });
+
+  test("anchor promotion rejects other providers and text-only, provisional, or non-turn identifiers without mutation", async () => {
+    const indexed = "gemini:user:user-query-content-11:abc123";
+    const stable = "gemini:user:23845300d6e6d28e";
+    for (const providerKey of ["chatgpt:anchor-chat", "claude:anchor-chat", "fixture:anchor-chat", "gemini:anchor-chat"]) {
+      await store.apply(request("enqueue", { key: providerKey, id: "a", text: "Identical prompt", afterUserMessageId: indexed }), ownerA, start);
+      const before = (await store.apply(request("read", { key: providerKey }), ownerA, start)).state;
+      const invalid = providerKey.startsWith("gemini:") ? [
+        { userMessageId: "Identical prompt", afterUserMessageId: stable },
+        { userMessageId: "gemini:user:user-query-content-undefined:abc123", afterUserMessageId: stable },
+        { userMessageId: "gemini:user:abc123", afterUserMessageId: stable },
+        { userMessageId: "chatgpt:user:11:abc123", afterUserMessageId: stable },
+        { userMessageId: indexed, afterUserMessageId: "gemini:user:user-query-content-9:abc123" },
+        { userMessageId: indexed, afterUserMessageId: "gemini:user:23845300d6e6d28" },
+        { userMessageId: indexed, afterUserMessageId: "gemini:user:zzzzzzzzzzzzzzzz" },
+        { userMessageId: indexed, afterUserMessageId: "claude:user:23845300d6e6d28e" },
+      ] : [{ userMessageId: indexed, afterUserMessageId: stable }];
+      for (const fields of invalid) {
+        await expect(store.apply(request("anchor", { key: providerKey, ...fields }), ownerA, start)).rejects.toThrow();
+        expect((await store.apply(request("read", { key: providerKey }), ownerA, start)).state).toEqual(before);
+      }
+    }
+  });
+
   test("only a genuinely new batch resets the completed transcript anchor", async () => {
     await enqueue("a");
     await store.apply(request("claim"), ownerA, start);

@@ -199,6 +199,26 @@ function simulateNativeChat(tab: Tab): { sent: string[]; stops: number; finish: 
 }
 
 describe("Persistent message queue UI", () => {
+  test.each(["Enter", "click"] as const)("queues %s during ChatGPT initial response after typing replaces Stop with Send", async activation => {
+    const tab = await createTab();
+    tab.action.setAttribute("aria-label", "Stop");
+    tab.doc.querySelector("main")!.insertAdjacentHTML("beforeend", '<span aria-busy="true" role="status"><span class="sr-only">ChatGPT is responding</span><span aria-hidden="true" class="pulsing-dot"></span></span>');
+    let nativeSends = 0;
+    tab.composer.addEventListener("keydown", event => { if (event.key === "Enter") nativeSends++; });
+    tab.action.addEventListener("click", () => nativeSends++);
+    draft(tab, "Follow up after the current response");
+    tab.action.setAttribute("type", "submit");
+    tab.action.setAttribute("aria-label", "Send");
+    if (activation === "Enter") expect(enter(tab)).toBe(false);
+    else tab.action.click();
+    await waitFor(() => !tab.queue.saving, "initial-response queue commit");
+    expect(nativeSends).toBe(0);
+    expect((await persisted()).items.map(item => ({ text: item.text, status: item.status }))).toEqual([
+      { text: "Follow up after the current response", status: "queued" },
+    ]);
+    expect(tab.composer.innerText).toBe("");
+  });
+
   test("Enter during the initial durable read respects an existing paused queue and clears only after commit", async () => {
     await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "seed", action: "enqueue", id: "existing-paused-item", text: "Saved before this tab opened" }, "seed", now);
     await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "seed", action: "pause", paused: true }, "seed", now);

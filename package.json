@@ -1,7 +1,7 @@
 {
   "name": "plannotator-chatgpt-notes",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.2.3",
   "type": "module",
   "scripts": {
     "build": "bun run scripts/build.ts",
@@ -11,7 +11,13 @@
     "e2e:dev-reload": "bun run test/dev-reload.ts",
     "clean": "rm -rf dist",
     "test:queue": "bun test test/queue-store.test.ts",
-    "reload": "bun run scripts/reload.ts"
+    "reload": "bun run scripts/reload.ts",
+    "version:check": "bun run scripts/version.ts check",
+    "version:patch": "bun run scripts/version.ts patch",
+    "version:minor": "bun run scripts/version.ts minor",
+    "version:major": "bun run scripts/version.ts major",
+    "package:release": "bun run scripts/package.ts",
+    "test:release": "bun test test/release-package.test.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -19,5 +25,8 @@
     "happy-dom": "^20.14.5",
     "puppeteer-core": "^24.8.0",
     "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "lucide": "1.51.0"
   }
 }

@@ -1,6 +1,6 @@
-# Plannotator ChatGPT Notes
+# Threadlane
 
-A Manifest V3 Chrome extension for annotating assistant responses and queuing follow-ups on ChatGPT (`chatgpt.com`), Claude (`claude.ai`), and Gemini (`gemini.google.com`). The installed extension name remains **Plannotator ChatGPT Notes**.
+A Manifest V3 Chrome extension for annotating assistant responses and queuing follow-ups on ChatGPT (`chatgpt.com`), Claude (`claude.ai`), and Gemini (`gemini.google.com`). The extension is named **Threadlane** (formerly Plannotator ChatGPT Notes). Existing internal storage identifiers are retained so renaming an existing installation preserves its saved data.
 
 ## What It Does
 
@@ -11,6 +11,14 @@ A Manifest V3 Chrome extension for annotating assistant responses and queuing fo
 - Hover a queued message to fade its number into a six-dot drag handle, then drag it to reorder; edit/remove messages and pause/resume sending
 - Share one durable queue per conversation across tabs in the same Chrome profile
 - Hot-reload during development without manually reloading the extension each edit
+
+Interface icons use [Lucide](https://lucide.dev/), bundled locally with consistent SVG strokes. Its license notices are included in `dist/THIRD_PARTY_NOTICES.txt`.
+
+## Saved notes and privacy
+
+Saved annotations live in the extension's own IndexedDB database and remain until you explicitly delete them. Note and queue records are encrypted with AES-256-GCM using keys stored locally in the extension; the privacy policy describes the protection and recovery limits. Inserting a revision prompt or sending a native/queued message keeps your notes. Insertion requires an empty composer without attachments. Notes saved by older versions in the supported site's local storage are imported into extension storage; the old copy is removed only after a successful import. A failed save/import keeps the source and shows a retryable error.
+
+Notes and queues stay in the current Chrome profile and work across its tabs. There is no publisher cloud storage, analytics, device sync, or built-in export. Queued messages are submitted through the chosen provider's normal composer. Removing the extension or clearing its storage removes its databases. See [PRIVACY.md](PRIVACY.md) for data categories, legacy storage, provider submissions, and the queue's bounded edited-message recovery records. Chrome's extension Options link opens a packaged offline copy of the policy.
 
 ## Message queue
 
@@ -39,6 +47,7 @@ bun run test:queue
 bun test test/chatgpt-dom.test.ts test/queue-ui.test.ts
 bun run e2e
 bun run e2e:dev-reload
+bun run package:release
 ```
 
 ## Load In Chrome
@@ -48,8 +57,44 @@ bun run e2e:dev-reload
 3. Enable Developer Mode
 4. Load unpacked from `dist/`
 
+## Versioning and releases
+
+We use [Semantic Versioning](https://semver.org/): **major.minor.patch**. Versioning starts with the **0.1.0** development baseline; **1.0.0** is reserved for the first stable release. Compatibility means the documented annotation/queue workflows and existing saved data continue to work.
+
+- **Patch** (`0.1.0` → `0.1.1`): compatible bug fixes and visual polish.
+- **Minor** (`0.1.1` → `0.2.0`): new compatible features. During the 0.x development series, breaking changes also require a minor bump and an explicit changelog entry.
+- **Major** (`1.4.2` → `2.0.0`): incompatible changes after 1.0.0. Always document migration steps; a version bump does not replace a data migration.
+
+`package.json` is the single version source. The root `manifest.json` is a build template; the build inserts the version into the output manifest. Load only a built output directory in Chrome. Builds validate the version against Chrome's numeric limits and the latest dated changelog entry before writing output. Development builds display `<version> (development)` through `version_name`; their reload build IDs remain separate from release versions. We currently use numeric versions only, without `-beta` or `-rc` suffixes.
+
+For each release:
+
+1. Record the changes under `[Unreleased]` in `CHANGELOG.md`.
+2. Preview the appropriate bump, then apply it:
+
+   ```bash
+   bun run version:patch --dry-run
+   bun run version:patch
+   # Or: bun run version:minor / bun run version:major
+   ```
+
+3. Run `bun run version:check`, `bunx tsc --noEmit`, and `bun test`. Create an isolated production candidate with `bun run package:release` and verify all affected providers live using that candidate. For local development, use `bun run reload` instead; its watcher also picks up version and changelog edits.
+4. Review and commit the release, then tag that exact commit as `vX.Y.Z` when ready. Push or publish only when explicitly requested. Once released, keep that version immutable; ship subsequent changes under a new version.
+
+The bump command resets lower components, moves the Unreleased notes into a dated entry, and leaves a fresh Unreleased section. It refuses invalid versions or empty notes. It does not build, commit, tag, push, or publish. Bump once per release, not on every development rebuild.
+
+### Production upload candidate
+
+`bun run package:release` builds into `.local/release/<version>/extension/` and writes a versioned ZIP plus SHA-256 file beside it. It leaves the installed development `dist/` untouched. The ZIP contains only the runtime scripts, manifest, extension icons, privacy page, and required third-party license notices; source maps, fixtures, store artwork, localhost permissions, and development reload hooks are excluded. Its content scripts match only ChatGPT, Claude, and Gemini over HTTPS. Development builds retain localhost fixture support.
+
+Packaging requires Bun and the local `zip` command; the release tests also use `unzip`.
+
+Packaging refuses to overwrite an existing candidate for the same version. To make another local candidate, use `bun run package:release --outdir <release-root>` or explicitly remove an obsolete candidate first. `bun run build --outdir <directory>` is also available for an isolated unpacked production build. Neither command uploads or publishes anything.
+
+Store materials are drafts in [store/LISTING.md](store/LISTING.md), [store/PRIVACY_FIELDS.md](store/PRIVACY_FIELDS.md), and [store/RELEASE_CHECKLIST.md](store/RELEASE_CHECKLIST.md). Public submission is authorized and the support contact is threadlane.support@gmail.com. The [public privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf) is hosted and the publisher dashboard is accessible. Publisher registration/payment, screenshots, and live production verification still need completion before submission. Review the encryption disclosures and final dashboard certifications against the tested build. A store installation with a different extension ID does not inherit extension-owned data from an unpacked development installation; this release has no database export/import tool. Avoid replacing a development install that still holds needed notes or queues.
+
 ## One-command development reload
 
 Run `bun run reload` to rebuild the extension and start a detached local watcher if one is not already running. It listens only on `127.0.0.1:19445` (or `PLANNOTATOR_EXTENSION_DEV_PORT`) and keeps rebuilding future source edits. Logs from a watcher started by this command go to `.local/plannotator-dev.log`.
 
-One-time setup: after the first run, click **Reload** for Plannotator ChatGPT Notes in `chrome://extensions`, then refresh your supported chat pages to activate the development reload hook. Subsequent rebuilds check all connected extension pages before reloading, and defer while any page has a draft, active response, edit, or queue operation. The worker rechecks before the global reload; each page refreshes only after observing the installed worker build or its old context becoming invalid, and only when its own draft is safe. The command reports the verified build ID, not a verified browser reload.
+One-time setup: after the first run, click **Reload** for Threadlane in `chrome://extensions`, then refresh your supported chat pages to activate the development reload hook. Subsequent rebuilds check all connected extension pages before reloading, and defer while any page has a draft, active response, edit, or queue operation. The worker rechecks before the global reload; each page refreshes only after observing the installed worker build or its old context becoming invalid, and only when its own draft is safe. The command reports the verified build ID, not a verified browser reload.

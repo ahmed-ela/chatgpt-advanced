@@ -1,4 +1,4 @@
-import { statSync, watch } from "node:fs";
+import { watch } from "node:fs";
 import { resolve } from "node:path";
 
 import { appDir, buildExtension, createBuildId, defaultDevPort } from "./build-lib";
@@ -13,8 +13,9 @@ const corsHeaders = {
   "access-control-allow-headers": "content-type",
 };
 const watchTargets = [
-  resolve(appDir, "src"),
-  resolve(appDir, "manifest.json"),
+  { path: resolve(appDir, "src"), recursive: true },
+  // Watch the parent so atomic version-file replacements stay observable.
+  { path: appDir, recursive: false },
 ];
 
 let currentBuildId = "booting";
@@ -66,14 +67,14 @@ const server = Bun.serve({
   },
 });
 
-console.log(`[browser-extension] watching ${watchTargets.join(", ")}`);
+console.log(`[browser-extension] watching source and release metadata in ${appDir}`);
 console.log(`[browser-extension] dev server ${devOrigin}${versionPath}`);
 console.log(`[browser-extension] load unpacked ${resolve(appDir, "dist")} once, then keep this running`);
 
 for (const target of watchTargets) {
-  const recursive = statSync(target).isDirectory();
-  watch(target, { recursive }, (_eventType, filename) => {
-    const changed = typeof filename === "string" ? filename : target;
+  watch(target.path, { recursive: target.recursive }, (_eventType, filename) => {
+    const changed = typeof filename === "string" ? filename : target.path;
+    if (target.path === appDir && !["manifest.json", "package.json", "CHANGELOG.md"].includes(changed)) return;
     scheduleRebuild(changed);
   });
 }

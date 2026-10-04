@@ -5,7 +5,7 @@ import { providerMessages } from "../src/provider-dom";
 import {
   findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages, getAssistantCompletionAfter,
-  isCurrentConversationReady, getAssistantMessageElements, getAssistantMessageId,
+  isCurrentConversationReady, getAssistantMessageElements, getAssistantMessageId, getStableUserMessageAnchor,
 } from "../src/chatgpt-dom";
 
 type Provider = "claude" | "gemini";
@@ -292,6 +292,40 @@ describe("Claude and Gemini DOM adapters", () => {
     expect(getAssistantCompletionAfter(unanswered!.id)).toBe(false);
     expect(getAssistantCompletionAfter("gemini:user:turn-1")).toBe(false);
     expect(getAssistantCompletionAfter("gemini:user:unrelated-turn")).toBe(false);
+  });
+
+  test("Gemini exposes a stable server-turn anchor without changing observed send identities", () => {
+    mount("gemini");
+    const turn = doc.getElementById("turn-0")!;
+    const prompt = turn.querySelector(".query-content")!;
+    prompt.id = "user-query-content-11";
+    const observed = getVisibleUserMessages()[0]!;
+    expect(getStableUserMessageAnchor(observed.id)).toBeNull();
+    turn.id = "23845300d6e6d28e";
+    const anchor = getStableUserMessageAnchor(observed.id);
+    expect(anchor).toBe("gemini:user:23845300d6e6d28e");
+    expect(getVisibleUserMessages()[0]).toEqual(observed);
+    expect(getAssistantCompletionAfter(anchor!)).toBe(true);
+    prompt.id = "user-query-content-9";
+    expect(getStableUserMessageAnchor(observed.id)).toBeNull();
+    expect(getAssistantCompletionAfter(observed.id)).toBe(false);
+    expect(getAssistantCompletionAfter(anchor!)).toBe(true);
+  });
+
+  test("Gemini anchor promotion keeps route and exact indexed-text identity checks", () => {
+    mount("gemini");
+    doc.getElementById("turn-0")!.id = "23845300d6e6d28e";
+    const observed = getVisibleUserMessages()[0]!.id;
+    doc.querySelector("main")!.insertAdjacentHTML("beforeend", user("gemini", 1));
+    doc.getElementById("turn-1")!.id = "46acfc12c8ad747e";
+    const repeated = getVisibleUserMessages()[1]!.id;
+    expect(getStableUserMessageAnchor(observed)).toBe("gemini:user:23845300d6e6d28e");
+    expect(getStableUserMessageAnchor(repeated)).toBe("gemini:user:46acfc12c8ad747e");
+    expect(getStableUserMessageAnchor(observed.replace(/:[^:]+$/, ":wronghash"))).toBeNull();
+    expect(getAssistantCompletionAfter("gemini:user:46acfc12c8ad747e")).toBe(false);
+    doc.querySelector("[jslog]")!.setAttribute("jslog", metadata("different-route"));
+    expect(getStableUserMessageAnchor(observed)).toBeNull();
+    expect(getAssistantCompletionAfter("gemini:user:23845300d6e6d28e")).toBe(false);
   });
 
   test("Gemini optimistic undefined IDs follow the last visible index and distinguish repeated prompt text", () => {

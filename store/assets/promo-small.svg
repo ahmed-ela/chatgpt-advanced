@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280">
+  <rect width="440" height="280" fill="#F7F7FA"/>
+  <rect x="30" y="30" width="58" height="58" rx="16" fill="#30364F"/>
+  <path d="M46 47H75M46 59H68M46 71H61" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+  <g font-family="Arial, sans-serif">
+    <text x="103" y="66" fill="#272C40" font-weight="600" font-size="27" letter-spacing="-.6">Threadlane</text>
+    <text x="30" y="140" fill="#272C40" font-weight="600" font-size="29" letter-spacing="-.7">Keep your thoughts.</text>
+    <text x="30" y="177" fill="#272C40" font-weight="600" font-size="29" letter-spacing="-.7">Queue what’s next.</text>
+    <text x="30" y="214" fill="#64697B" font-size="16">Inline notes. Persistent message queues.</text>
+    <text x="30" y="252" fill="#64697B" font-size="13">ChatGPT  ·  Claude  ·  Gemini</text>
+  </g>
+</svg>

@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Plannotator ChatGPT Notes",
-  "version": "0.0.1",
+  "name": "Threadlane",
   "description": "Highlight AI responses on ChatGPT, Claude, and Gemini, add inline notes, and queue follow-up messages in the native composer.",
+  "icons": {
+    "16": "assets/icons/16.png",
+    "32": "assets/icons/32.png",
+    "48": "assets/icons/48.png",
+    "128": "assets/icons/128.png"
+  },
+  "options_page": "privacy.html",
   "content_scripts": [
     {
       "matches": [
@@ -22,5 +28,10 @@
   "background": {
     "service_worker": "queue-worker.js",
     "type": "module"
-  }
+  },
+  "version": "0.2.3",
+  "version_name": "0.2.3 (development)",
+  "host_permissions": [
+    "http://127.0.0.1:19445/*"
+  ]
 }
