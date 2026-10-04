@@ -1,6 +1,6 @@
 # Firefox port
 
-Threadlane's Firefox desktop build uses the same annotation, queue, encryption, and provider code as Chrome. It requires Firefox 140 or later. This is a release candidate, not a signed or published Mozilla add-on.
+Threadlane's Firefox desktop build uses the same annotation, queue, encryption, and provider code as Chrome. It requires Firefox 140 or later. The selected beta route is a Mozilla-signed, self-distributed package with an HTTPS update feed, not a public AMO listing. Signing and the update channel are not operational until verified; see [submission status](FIREFOX_SUBMISSION_STATUS.md) and [distribution rationale](BETA_DISTRIBUTION.md).
 
 ## Build and inspect
 
@@ -22,6 +22,12 @@ The only supported page matches are HTTPS ChatGPT, Claude, and Gemini. Productio
 
 `web-ext` 10.7.0 reports three `UNSAFE_VAR_ASSIGNMENT` warnings for existing `innerHTML` templates. User-controlled note, queue, error, and URL text passes through the local HTML-escaping helper; draft text is set through the textarea's `value`; icons are bundled Lucide SVG. Keep reviewing these boundaries when modifying templates. The validator also reports the Android 142 data-consent minimum despite this desktop-only manifest omitting `gecko_android` ([Mozilla issue 3561](https://github.com/mozilla/web-ext/issues/3561)). Do not add Android support merely to hide that warning. Lint warnings are retained in the validation output.
 
+## Signed beta distribution
+
+The next candidate is 0.3.2. Its intended `browser_specific_settings.gecko.update_url` is `https://raw.githubusercontent.com/ahmed-ela/threadlane-updates/main/firefox/updates.json`, and its Gecko ID remains `threadlane@extensions.invalid`. Submit the package through Mozilla's **On your own** channel, provide reproducible source, and distribute only Mozilla's returned signed XPI. Signed files will be hosted as versioned GitHub Release assets. Publishing the feed must follow signing, asset verification, and release qualification; a Git push of application source alone cannot update installed copies.
+
+Firefox reads a higher version from the installed add-on's update URL and verifies its signed package. The feed must name the exact add-on ID and version, HTTPS XPI URL, and SHA-256 of the **signed** download. Keep the feed address stable and available; an installed version cannot discover a replacement address if the old feed disappears. Current temporary 0.3.1 users must install a signed beta once; loading an unsigned ZIP through `about:debugging` does not become persistent or automatically updating by itself. [Mozilla's self-distribution guide](https://extensionworkshop.com/documentation/publish/self-distribution/) and [update manifest reference](https://extensionworkshop.com/documentation/manage/updating-your-extension/).
+
 ## Try the unsigned candidate locally
 
 1. Open `about:debugging#/runtime/this-firefox` in Firefox.
@@ -40,11 +46,12 @@ Firefox 140 introduced built-in data consent. New add-ons must declare their tra
 ## Before Mozilla submission
 
 - Complete the remaining live cases listed below, including successful Send now interruption, failed/uncertain delivery, and the controls not separately exercised on every provider.
-- Verify candidate 0.3.1 through event-page suspension and a signed installation across browser restart before calling restart recovery fully verified. Earlier 0.3.0 runtime checks do not replace this qualification.
+- Qualify the final candidate through event-page suspension and a signed installation across browser restart. Historical 0.3.0/0.3.1 temporary-installation checks do not prove the new package or update path.
 - Review site-access and data-consent prompts using a signed installation. Temporary loading skips parts of the normal installation experience.
-- Update the public privacy policy from this branch and prepare Firefox screenshots and listing metadata.
+- Keep the source, packaged, and public privacy policies aligned, including the GitHub-hosted feed/download connection disclosure. Self-distribution does not need a public AMO listing or listing screenshots, but reviewer/source information is still required.
 - Supply the TypeScript source, lockfile, local assets, and build instructions to Mozilla so reviewers can reproduce the bundled JavaScript.
-- Submit the Firefox ZIP to Mozilla for signing/review. Publishing or self-distribution requires a signed package; the local ZIP is only a development and submission artifact.
+- Complete account two-step authentication and any required developer agreement, then select **On your own** for Mozilla signing/review. Treat the local unsigned ZIP as a submission artifact only.
+- Verify the signed XPI and public feed/download hashes, normal first installation and browser restart, and a real later-version update before calling the automatic update path tested. See [BETA_DISTRIBUTION.md](BETA_DISTRIBUTION.md).
 
 ## Candidate 0.3.1
 

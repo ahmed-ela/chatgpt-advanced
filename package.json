@@ -1,7 +1,7 @@
 {
   "name": "plannotator-chatgpt-notes",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "scripts": {
     "build": "bun run scripts/build.ts",
@@ -19,8 +19,11 @@
     "version:major": "bun run scripts/version.ts major",
     "package:release": "bun run scripts/package.ts",
     "package:firefox": "bun run scripts/package.ts --target firefox",
-    "lint:firefox": "web-ext lint --source-dir dist-firefox",
-    "test:release": "bun test test/release-package.test.ts"
+    "lint:firefox": "web-ext lint --source-dir dist-firefox --self-hosted",
+    "test:release": "bun test test/release-package.test.ts",
+    "build:chrome-beta": "bun run scripts/build.ts --target chrome-beta",
+    "package:chrome-beta": "bun run scripts/package.ts --target chrome-beta",
+    "feed:firefox": "bun run scripts/firefox-feed.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -20,6 +20,12 @@ When you choose Insert, annotation text is placed in the provider's native compo
 
 The Firefox installation declares personal communications and website content in its required data permissions because these features can submit your queued messages and selected quotes to the chosen AI provider. These permissions do not enable publisher analytics or telemetry. The Firefox build does not run in private browsing windows.
 
+## Extension updates
+
+Chrome Web Store installations receive extension updates through Google. The self-distributed Firefox beta, starting with version 0.3.2, uses Firefox's built-in updater to check a public HTTPS update feed and download Mozilla-signed extension packages hosted on GitHub. These are browser-managed installation/update requests, not requests made by the annotation or queue features.
+
+The update and download hosts receive ordinary connection information, including your IP address and request metadata, under their own privacy policies. Threadlane does not attach conversation text, notes, queued messages, account credentials, or tracking identifiers to these update requests. The feed and extension packages are publicly accessible; they do not contain your saved extension data. GitHub's handling of service requests is described in its [privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
+
 ## Retention and deletion
 
 Saved notes remain until you delete them; inserting a prompt or sending a message does not delete your notes. Queued text remains while pending, uncertain, or awaiting its response, and is removed from the active queue after completion or explicit deletion. To recognize retries after a lost save response, the queue may retain the text of up to 20 recently edited, retired messages per conversation until those recovery records are replaced or extension storage is cleared. Non-content identifiers and deletion records may remain to prevent duplicate sends or reimporting deleted notes.

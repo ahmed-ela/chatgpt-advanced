@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { appDir, browserTarget, buildExtension, firefoxDataPermissions, firefoxExtensionId, firefoxMinimumVersion, iconSizes, parseBuildArguments, providerMatches, type BrowserTarget } from "./build-lib";
+import { appDir, browserTarget, buildExtension, chromeBetaDescription, chromeBetaName, firefoxDataPermissions, firefoxExtensionId, firefoxMinimumVersion, firefoxUpdateUrl, iconSizes, parseBuildArguments, providerMatches, type BrowserTarget } from "./build-lib";
 import { readProjectVersion } from "./version";
 
 export interface ReleasePackage {
@@ -37,6 +37,10 @@ export async function validateReleaseExtension(directory: string, version: strin
       JSON.stringify(manifest.content_scripts[0].js) !== JSON.stringify(["content.js", "queue-ui.js"]) || manifest.options_page !== "privacy.html") {
     throw new Error("Release manifest must target only the three supported HTTPS providers.");
   }
+  if (manifest.name !== (target === "chrome-beta" ? chromeBetaName : "Threadlane") ||
+      (target === "chrome-beta" && manifest.description !== chromeBetaDescription)) {
+    throw new Error("Release manifest has the wrong channel name or beta disclosure.");
+  }
   const expectedBackground = target === "firefox"
     ? { scripts: ["queue-worker.js"] }
     : { service_worker: "queue-worker.js", type: "module" };
@@ -44,10 +48,10 @@ export async function validateReleaseExtension(directory: string, version: strin
     throw new Error(`Release manifest has an invalid ${target} background configuration.`);
   }
   if (target === "firefox") {
-    const expectedSettings = { gecko: { id: firefoxExtensionId, strict_min_version: firefoxMinimumVersion,
+    const expectedSettings = { gecko: { id: firefoxExtensionId, strict_min_version: firefoxMinimumVersion, update_url: firefoxUpdateUrl,
       data_collection_permissions: { required: firefoxDataPermissions } } };
     if (JSON.stringify(manifest.browser_specific_settings) !== JSON.stringify(expectedSettings) || manifest.incognito !== "not_allowed") {
-      throw new Error("Firefox release requires its stable ID, minimum version, transmission consent, and private-browsing restriction.");
+      throw new Error("Firefox release requires its stable ID, minimum version, update feed, transmission consent, and private-browsing restriction.");
     }
   } else if (manifest.browser_specific_settings !== undefined) {
     throw new Error("Chrome release must not contain Firefox-specific settings.");
@@ -72,7 +76,7 @@ export async function packageExtension(options: { target?: BrowserTarget; releas
   const target = browserTarget(options.target);
   const version = await readProjectVersion(appDir);
   const outputRoot = resolve(options.releaseRoot ?? join(appDir, ".local/release"));
-  const releaseRoot = target === "firefox" ? join(outputRoot, "firefox") : outputRoot;
+  const releaseRoot = target === "chrome" ? outputRoot : join(outputRoot, target);
   const destination = join(releaseRoot, version);
   try {
     await stat(destination);
@@ -87,7 +91,7 @@ export async function packageExtension(options: { target?: BrowserTarget; releas
     await buildExtension({ target, outdir: extensionDir });
     const files = await validateReleaseExtension(extensionDir, version, target);
     if (await readProjectVersion(appDir) !== version) throw new Error("Project version changed during packaging; retry with consistent metadata.");
-    const zipName = `threadlane-${target === "firefox" ? "firefox-" : ""}${version}.zip`;
+    const zipName = `threadlane-${target === "chrome" ? "" : `${target}-`}${version}.zip`;
     const zipPath = join(staging, zipName);
     const zipper = Bun.spawn(["zip", "-q", "-X", zipPath, ...files], { cwd: extensionDir, stdout: "pipe", stderr: "pipe" });
     const [status, stderr] = await Promise.all([zipper.exited, new Response(zipper.stderr).text()]);

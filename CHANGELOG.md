@@ -4,6 +4,18 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-04
+
+### Added
+
+- Add an explicitly named Threadlane BETA Chrome build and isolated package output for a separate unlisted store listing.
+- Configure the existing Firefox add-on identity for a stable HTTPS update feed used by Mozilla-signed, self-distributed releases.
+- Generate Firefox update metadata only after the local XPI matches both a trusted Mozilla download and the public GitHub release asset, with matching identity/version/feed checks and a pinned SHA-256 hash; support an empty feed while signing is pending.
+
+### Changed
+
+- Keep the public Chrome build target and its committed 0.2.5 submission artifacts separate from beta packages.
+
 ## [0.3.1] - 2026-10-04
 
 ### Fixed

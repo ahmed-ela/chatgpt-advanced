@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appDir, buildExtension, defaultOutputDirectory, distDir, firefoxDataPermissions, firefoxDistDir, firefoxExtensionId, firefoxMinimumVersion, fixtureMatches, iconSizes, parseBuildArguments, providerMatches } from "../scripts/build-lib";
+import { appDir, buildExtension, chromeBetaDescription, chromeBetaDistDir, chromeBetaName, defaultOutputDirectory, distDir, firefoxDataPermissions, firefoxDistDir, firefoxExtensionId, firefoxMinimumVersion, firefoxUpdateUrl, fixtureMatches, iconSizes, parseBuildArguments, providerMatches } from "../scripts/build-lib";
 import { packageExtension, releaseFiles, validateReleaseExtension } from "../scripts/package";
 import { readProjectVersion } from "../scripts/version";
 
@@ -25,6 +25,29 @@ async function hashFiles(directory: string): Promise<Record<string, string>> {
 }
 
 describe("production release packaging", () => {
+  test("Chrome beta has a separate identity label, disclosure and output without changing public artifacts", async () => {
+    const releaseRoot = await temporaryDirectory();
+    const publicBefore = await hashFiles(distDir);
+    const release = await packageExtension({ target: "chrome-beta", releaseRoot });
+    const manifest = JSON.parse(await readFile(join(release.extensionDir, "manifest.json"), "utf8"));
+    expect(release.extensionDir).toBe(join(releaseRoot, "chrome-beta", release.version, "extension"));
+    expect(release.zipPath).toBe(join(releaseRoot, "chrome-beta", release.version, `threadlane-chrome-beta-${release.version}.zip`));
+    expect(manifest.name).toBe(chromeBetaName);
+    expect(manifest.description).toBe(chromeBetaDescription);
+    expect(manifest.description).toContain("THIS EXTENSION IS FOR BETA TESTING");
+    expect(manifest.description.length).toBeLessThanOrEqual(132);
+    expect(manifest.background).toEqual({ service_worker: "queue-worker.js", type: "module" });
+    expect(manifest.key).toBeUndefined();
+    expect(manifest.update_url).toBeUndefined();
+    expect(manifest.browser_specific_settings).toBeUndefined();
+    expect((await validateReleaseExtension(release.extensionDir, release.version, "chrome-beta")).length).toBe(10);
+    await expect(validateReleaseExtension(release.extensionDir, release.version, "chrome")).rejects.toThrow("channel name");
+    manifest.name = "Threadlane";
+    await writeFile(join(release.extensionDir, "manifest.json"), JSON.stringify(manifest));
+    await expect(validateReleaseExtension(release.extensionDir, release.version, "chrome-beta")).rejects.toThrow("channel name");
+    expect(await hashFiles(distDir)).toEqual(publicBefore);
+  });
+
   test("creates an isolated, licensed, versioned ZIP without development access or changing installed dist", async () => {
     const releaseRoot = await temporaryDirectory();
     const installedBefore = await hashFiles(distDir);
@@ -81,7 +104,7 @@ describe("production release packaging", () => {
     expect(manifest.version).toBe(await readProjectVersion(appDir));
     expect(manifest.background).toEqual({ scripts: ["queue-worker.js"] });
     expect(manifest.browser_specific_settings).toEqual({ gecko: {
-      id: firefoxExtensionId, strict_min_version: firefoxMinimumVersion,
+      id: firefoxExtensionId, strict_min_version: firefoxMinimumVersion, update_url: firefoxUpdateUrl,
       data_collection_permissions: { required: ["personalCommunications", "websiteContent"] },
     } });
     expect(manifest.incognito).toBe("not_allowed");
@@ -118,6 +141,8 @@ describe("production release packaging", () => {
       (manifest: any) => { manifest.background.persistent = false; },
       (manifest: any) => { manifest.browser_specific_settings.gecko.id = "other@extensions.invalid"; },
       (manifest: any) => { manifest.browser_specific_settings.gecko.strict_min_version = "139.0"; },
+      (manifest: any) => { delete manifest.browser_specific_settings.gecko.update_url; },
+      (manifest: any) => { manifest.browser_specific_settings.gecko.update_url = "https://example.com/other.json"; },
       (manifest: any) => { manifest.browser_specific_settings.gecko.data_collection_permissions.required = ["none"]; },
       (manifest: any) => { manifest.browser_specific_settings.gecko_android = { strict_min_version: "142.0" }; },
       (manifest: any) => { delete manifest.browser_specific_settings.gecko.data_collection_permissions; },
@@ -133,7 +158,7 @@ describe("production release packaging", () => {
     expect((await validateReleaseExtension(outdir, version, "firefox")).length).toBe(10);
   });
 
-  test.each(["chrome", "firefox"] as const)("%s development output keeps local fixtures and reload hooks while release validation rejects it", async target => {
+  test.each(["chrome", "chrome-beta", "firefox"] as const)("%s development output keeps local fixtures and reload hooks while release validation rejects it", async target => {
     const outdir = await temporaryDirectory();
     await buildExtension({ target, dev: true, outdir, buildId: "release-test-dev", devOrigin: "http://127.0.0.1:19777" });
     const version = await readProjectVersion(appDir);
@@ -164,6 +189,8 @@ describe("production release packaging", () => {
     expect(parseBuildArguments([])).toEqual({ target: "chrome" });
     expect(defaultOutputDirectory()).toBe(distDir);
     expect(defaultOutputDirectory("firefox")).toBe(firefoxDistDir);
+    expect(defaultOutputDirectory("chrome-beta")).toBe(chromeBetaDistDir);
+    expect(parseBuildArguments(["--target", "chrome-beta"])).toEqual({ target: "chrome-beta" });
     expect(firefoxDataPermissions).not.toContain("none");
     const outdir = await temporaryDirectory();
     const child = Bun.spawn([process.execPath, join(appDir, "scripts/build.ts"), "--outdir", outdir, "--target", "firefox"], { stdout: "pipe", stderr: "pipe" });

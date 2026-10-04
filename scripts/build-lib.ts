@@ -8,9 +8,13 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
 export const appDir = resolve(scriptsDir, "..");
 export const distDir = resolve(appDir, "dist");
 export const firefoxDistDir = resolve(appDir, "dist-firefox");
+export const chromeBetaDistDir = resolve(appDir, ".local/build/chrome-beta");
 export const defaultDevPort = Number(process.env.PLANNOTATOR_EXTENSION_DEV_PORT ?? "19445");
-export type BrowserTarget = "chrome" | "firefox";
+export type BrowserTarget = "chrome" | "chrome-beta" | "firefox";
+export const chromeBetaName = "Threadlane BETA";
+export const chromeBetaDescription = "THIS EXTENSION IS FOR BETA TESTING. Annotate ChatGPT, Claude, and Gemini and queue follow-up messages.";
 export const firefoxExtensionId = "threadlane@extensions.invalid";
+export const firefoxUpdateUrl = "https://raw.githubusercontent.com/ahmed-ela/threadlane-updates/main/firefox/updates.json";
 // Firefox 140 introduced built-in install consent for these data categories.
 // Queued prompts and annotation excerpts are sent to the user's AI provider;
 // local-only storage and the absence of telemetry do not make this "none".
@@ -42,6 +46,7 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
   const manifest = await loadManifest();
   if ("version" in manifest || "version_name" in manifest) throw new Error("Set the version in package.json only; manifest.json is a build template.");
   manifest.version = version;
+  if (target === "chrome-beta") { manifest.name = chromeBetaName; manifest.description = chromeBetaDescription; }
   if (dev) manifest.version_name = `${version} (development)`;
   const contentScripts = manifest.content_scripts as Array<Record<string, unknown>>;
   if (contentScripts.length !== 1) throw new Error("Expected one supported-provider content script registration.");
@@ -97,6 +102,7 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
       gecko: {
         id: firefoxExtensionId,
         strict_min_version: firefoxMinimumVersion,
+        update_url: firefoxUpdateUrl,
         data_collection_permissions: { required: [...firefoxDataPermissions] },
       },
     };
@@ -124,12 +130,13 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
 }
 
 export function browserTarget(value: unknown = "chrome"): BrowserTarget {
-  if (value !== "chrome" && value !== "firefox") throw new Error("Choose --target chrome or --target firefox.");
+  if (value !== "chrome" && value !== "chrome-beta" && value !== "firefox") throw new Error("Choose --target chrome, chrome-beta, or firefox.");
   return value;
 }
 
 export function defaultOutputDirectory(target: BrowserTarget = "chrome"): string {
-  return browserTarget(target) === "firefox" ? firefoxDistDir : distDir;
+  browserTarget(target);
+  return target === "firefox" ? firefoxDistDir : target === "chrome-beta" ? chromeBetaDistDir : distDir;
 }
 
 /** Shared CLI flags; reject duplicates and missing values before any build writes. */
@@ -141,7 +148,7 @@ export function parseBuildArguments(args: string[]): { target: BrowserTarget; ou
     const flag = args[index]!;
     const value = args[index + 1];
     if (!["--target", "--outdir"].includes(flag) || seen.has(flag) || !value || value.startsWith("--")) {
-      throw new Error("Use [--target chrome|firefox] [--outdir <directory>], once per option.");
+      throw new Error("Use [--target chrome|chrome-beta|firefox] [--outdir <directory>], once per option.");
     }
     seen.add(flag);
     if (flag === "--target") target = browserTarget(value);
