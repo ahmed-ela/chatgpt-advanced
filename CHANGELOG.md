@@ -8,16 +8,18 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ### Fixed
 
-- Continue sending queued follow-ups in open background tabs on ChatGPT, Claude, and Gemini, retaining completion, draft, pause, ownership, and uncertain-send checks.
+- Remove the visible-tab requirement for queued follow-ups while retaining completion, draft, pause, ownership, and uncertain-send checks. Live Chrome background sending passed on ChatGPT and Claude; Gemini can still wait for its native response animation to finish when the tab becomes visible.
 - Deliver controlled-editor changes through `beforeinput` before falling back to direct DOM edits, preserving editor cancellation and avoiding duplicate insertion.
 - Wake queue checks directly from completion events and yield native composer commits without background-throttled timers.
 - Reject expired send authorizations after a suspended tab resumes instead of clicking Send with stale ownership.
+
+Firefox 0.3.4 live background verification remains pending because computer use could not complete the temporary-add-on file picker. This candidate has not been submitted to Chrome or published through the Firefox update feed; see [verification status](store/BACKGROUND_QUEUE_VERIFICATION.md).
 
 ## [0.3.3] - 2026-10-04
 
 ### Changed
 
-- Qualify delivery of Mozilla-signed Firefox updates from 0.3.2 to 0.3.3 through the public HTTPS update feed. This release changes the version only; extension runtime behavior and permissions are unchanged.
+- Prepare a version-only candidate for qualifying Mozilla-signed Firefox updates from 0.3.2 to 0.3.3 through the public HTTPS update feed. Extension runtime behavior and permissions are unchanged. Signing is complete, but the normal version-upgrade and state-retention test remains pending; the live feed still advertises 0.3.2.
 
 ## [0.3.2] - 2026-10-04
 
