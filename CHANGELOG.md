@@ -4,6 +4,19 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-04
+
+### Fixed
+
+- Allow one matching deferred native send after another composer extension cancels the initial queued click, without blocking the replay or allowing duplicate sends. Revoke that allowance when the draft, conversation, or composer changes.
+- Recover a closed extension database connection without clearing saved queues or notes, and retry only when a transaction could not begin.
+
+## [0.2.4] - 2026-10-04
+
+### Fixed
+
+- Let Retry resume a saved message after an unconfirmed send by clearing only its unchanged matching composer draft after the retry is durably saved. Preserve other drafts and pause state.
+
 ## [0.2.3] - 2026-10-04
 
 ### Fixed

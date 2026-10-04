@@ -15,34 +15,64 @@ interface Envelope { id: string; format: 1; keyToken: string; iv: Uint8Array; ci
 interface Snapshot { key: KeyRecord; record?: Envelope; legacy?: unknown }
 interface Mutation<T, R> { value: T; result: R; changed: boolean }
 
+/** Only thrown before a transaction exists, so no write can have committed. */
+class ClosedBeforeTransaction extends Error {
+  constructor(readonly database: IDBDatabase, cause: unknown) {
+    super("The storage connection closed before its transaction began.", { cause });
+  }
+}
+
 export class EncryptedRecordStore<T extends { key: string }> {
   private connection?: Promise<IDBDatabase>;
+  private connectedDatabase?: IDBDatabase;
 
   constructor(private readonly factory: IDBFactory, private readonly name: string, private readonly legacyTable: string) {}
 
   async close(): Promise<void> {
     const connection = this.connection;
     this.connection = undefined;
+    this.connectedDatabase = undefined;
     if (connection) (await connection).close();
   }
 
   async apply<R>(key: string, initial: () => T, mutate: (value: T) => Mutation<T, R>): Promise<R> {
-    const database = await this.database();
     const id = await this.lookupId(key);
-    for (let attempt = 0; attempt < MAX_CONFLICTS; attempt++) {
-      const snapshot = await this.snapshot(database, id);
-      const value = snapshot.record ? await this.decrypt(snapshot.record, snapshot.key, key) : initial();
-      const mutation = mutate(value);
-      if (!mutation.changed) return mutation.result;
-      const next = await this.encrypt(id, snapshot.key, mutation.value);
-      if (await this.compareAndSwap(database, id, snapshot, next)) return mutation.result;
+    for (let reopen = 0; ; reopen++) {
+      try {
+        const database = await this.database();
+        for (let attempt = 0; attempt < MAX_CONFLICTS; attempt++) {
+          const snapshot = await this.snapshot(database, id);
+          const value = snapshot.record ? await this.decrypt(snapshot.record, snapshot.key, key) : initial();
+          const mutation = mutate(value);
+          if (!mutation.changed) return mutation.result;
+          const next = await this.encrypt(id, snapshot.key, mutation.value);
+          if (await this.compareAndSwap(database, id, snapshot, next)) return mutation.result;
+        }
+        throw new Error("Storage is busy in another tab. Keep this tab open and retry.");
+      } catch (error) {
+        if (!(error instanceof ClosedBeforeTransaction)) throw error;
+        this.forgetConnection(error.database);
+        error.database.close();
+        if (reopen >= 1) throw error.cause;
+        // Re-read and authenticate a fresh snapshot after reopening. Never
+        // replay an aborted transaction or an uncertain committed mutation.
+      }
     }
-    throw new Error("Storage is busy in another tab. Keep this tab open and retry.");
+  }
+
+  private forgetConnection(database: IDBDatabase): void {
+    // A delayed event/error from an old handle must not evict its replacement.
+    if (this.connectedDatabase !== database) return;
+    this.connection = undefined;
+    this.connectedDatabase = undefined;
   }
 
   private database(): Promise<IDBDatabase> {
     if (!this.connection) {
       const opening = this.open().then(async database => {
+        if (this.connection === opening) this.connectedDatabase = database;
+        database.onclose = () => this.forgetConnection(database);
+        database.onversionchange = () => { this.forgetConnection(database); database.close(); };
         try {
           await this.initializeKey(database);
           await this.migrate(database);
@@ -50,7 +80,9 @@ export class EncryptedRecordStore<T extends { key: string }> {
         } catch (error) { database.close(); throw error; }
       });
       this.connection = opening;
-      void opening.catch(() => { if (this.connection === opening) this.connection = undefined; });
+      void opening.catch(() => {
+        if (this.connection === opening) { this.connection = undefined; this.connectedDatabase = undefined; }
+      });
     }
     return this.connection;
   }
@@ -71,7 +103,6 @@ export class EncryptedRecordStore<T extends { key: string }> {
       request.onsuccess = () => {
         const database = request.result;
         if (failed) { database.close(); return; }
-        database.onversionchange = () => { database.close(); this.connection = undefined; };
         resolve(database);
       };
     });
@@ -217,7 +248,13 @@ function equalBytes(a: Uint8Array | ArrayBuffer, b: Uint8Array | ArrayBuffer): b
 /** Only synchronous IndexedDB requests/callbacks belong inside this helper. */
 function transaction<R>(database: IDBDatabase, tables: string[], mode: IDBTransactionMode, run: (tx: IDBTransaction, finish: (result: R) => void, fail: (error: unknown) => void) => void): Promise<R> {
   return new Promise((resolve, reject) => {
-    const tx = database.transaction(tables, mode, { durability: "strict" });
+    let tx: IDBTransaction;
+    try { tx = database.transaction(tables, mode, { durability: "strict" }); }
+    catch (error) {
+      reject(error && typeof error === "object" && "name" in error && error.name === "InvalidStateError"
+        ? new ClosedBeforeTransaction(database, error) : error);
+      return;
+    }
     let result: R;
     let finished = false;
     let failure: unknown;

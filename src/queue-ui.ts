@@ -1,5 +1,6 @@
 import { QUEUE_MESSAGE_TYPE, getQueueKey, type QueueItem, type QueueState } from "./queue-store";
 import { icon } from "./icons";
+import { NativeReplayGuard } from "./native-replay-guard";
 import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages,
@@ -14,6 +15,7 @@ interface QueueRuntime {
 
 const ROOT = "plannotator-message-queue";
 const POLL_MS = 900;
+const SEND_CONFIRM_MS = 15_000;
 const SEND_DRAFT_WARNING = "Queue or clear the current draft before using Send now.";
 const EDIT_DRAFT_WARNING = "Queue or clear the current draft before editing a queued message.";
 const normalize = (text: string) => text.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trim();
@@ -35,6 +37,7 @@ export class MessageQueue {
   private saving = false;
   private dispatching = false;
   private nativeDispatch = false;
+  private nativeReplay = new NativeReplayGuard();
   private polling = false;
   private tickPending = false;
   private tickTimer = 0;
@@ -83,7 +86,10 @@ export class MessageQueue {
     window.addEventListener("keydown", event => this.onKey(event), options);
     window.addEventListener("click", event => this.onNativeClick(event), options);
     window.addEventListener("submit", event => {
-      if (this.nativeDispatch) return;
+      if (this.nativeDispatch) { this.nativeReplay.observeInitialSubmit(event); return; }
+      const replay = this.nativeReplay.submit(event as SubmitEvent);
+      if (replay === "allow") return;
+      if (replay === "block") { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const composer = findQueueComposer();
       if (composer && event.target instanceof Element && event.target.contains(composer) && this.shouldQueue()) {
         event.preventDefault(); event.stopImmediatePropagation(); void this.enqueue();
@@ -97,7 +103,7 @@ export class MessageQueue {
         this.render(); this.scheduleTick();
       });
     }, { signal: this.abort.signal });
-    document.addEventListener("visibilitychange", () => this.scheduleTick(), { signal: this.abort.signal });
+    document.addEventListener("visibilitychange", () => { this.nativeReplay.check(); this.scheduleTick(); }, { signal: this.abort.signal });
     window.addEventListener("resize", () => this.position(), { signal: this.abort.signal });
     document.addEventListener("scroll", () => this.position(), { capture: true, passive: true, signal: this.abort.signal });
     this.shadow.addEventListener("click", event => { void this.onAction(event); });
@@ -200,6 +206,7 @@ export class MessageQueue {
     // React to native completion signals immediately; polling is only fallback.
     this.observer = new MutationObserver(records => {
       if (records.every(record => record.target === this.host || this.host.contains(record.target))) return;
+      this.nativeReplay.check();
       for (const wake of this.domWaiters) wake();
       if (!this.state?.items.length || this.dispatching || this.saving || isChatBusy()) return;
       this.scheduleTick();
@@ -213,6 +220,7 @@ export class MessageQueue {
   }
 
   stop(): void {
+    this.nativeReplay.finish();
     clearInterval(this.pollTimer); clearTimeout(this.tickTimer); this.observer?.disconnect(); this.abort.abort();
     for (const wake of this.domWaiters) wake();
     this.host.remove();
@@ -249,6 +257,7 @@ export class MessageQueue {
   private syncRoute(): string | null {
     const key = getQueueKey(location.href);
     if (key !== this.key) {
+      this.nativeReplay.revoke();
       clearConversationAlias();
       if (!this.key && key?.startsWith("chatgpt:") && this.firstSend && !this.firstSend.key && Date.now() < this.firstSend.expiresAt) {
         this.firstSend.key = key;
@@ -355,15 +364,20 @@ export class MessageQueue {
     const composer = findQueueComposer();
     const target = event.composedPath()[0];
     if (!composer || !(target instanceof Node) || !composer.contains(target)) return;
+    if (event.isTrusted) this.nativeReplay.trustedIntent();
     if (!this.shouldQueue()) { this.captureFirstSend(); return; }
     event.preventDefault(); event.stopImmediatePropagation();
     void this.enqueue();
   }
 
   private onNativeClick(event: MouseEvent): void {
-    if (this.nativeDispatch) return;
+    if (this.nativeDispatch) { this.nativeReplay.observeInitialClick(event); return; }
+    const replay = this.nativeReplay.click(event);
+    if (replay === "allow") return;
+    if (replay === "block") { event.preventDefault(); event.stopImmediatePropagation(); return; }
     const send = findQueueSendButton();
     if (!send || !event.composedPath().includes(send)) return;
+    if (event.isTrusted) this.nativeReplay.trustedIntent();
     if (!this.shouldQueue()) { this.captureFirstSend(); return; }
     event.preventDefault(); event.stopImmediatePropagation();
     void this.enqueue();
@@ -461,7 +475,10 @@ export class MessageQueue {
         const stop = findQueueStopButton();
         if (!stop) throw new Error("The current response cannot be stopped yet. The message remains queued.");
         composer.setAttribute("data-plannotator-queued-send", item.id);
-        try { stop.click(); } finally { composer.removeAttribute("data-plannotator-queued-send"); }
+        // The native control can reuse the last Send element for Stop. This
+        // explicit owned action must not be mistaken for that send's late replay.
+        this.nativeDispatch = true;
+        try { stop.click(); } finally { this.nativeDispatch = false; composer.removeAttribute("data-plannotator-queued-send"); }
         const deadline = Date.now() + 7000;
         while (isChatBusy() && key === this.syncRoute() && !this.abort.signal.aborted && Date.now() < deadline) {
           await this.waitForDomChange(200);
@@ -498,10 +515,23 @@ export class MessageQueue {
         throw new Error("Send was interrupted. Check the conversation before retrying.");
       }
       clicked = true;
+      const deadline = Date.now() + SEND_CONFIRM_MS;
+      const rawDraft = readComposer(composer);
+      const expectedComposer = composer;
+      const expectedItem = item;
+      this.nativeReplay.begin({ composer, button: send, form: send.form, expiresAt: deadline,
+        isCurrent: () => this.dispatching && !this.abort.signal.aborted &&
+          key === this.key && key === getQueueKey(location.href) && document.visibilityState === "visible" &&
+          this.state?.items.some(entry => entry.id === expectedItem.id && entry.status === "sending" && entry.owner === expectedItem.owner) === true &&
+          (sendNow || !this.state?.paused) && findQueueComposer() === expectedComposer && findQueueSendButton() === send &&
+          readComposer(expectedComposer) === rawDraft && !isChatBusy() && !hasComposerAttachments() && ready(),
+      });
       this.nativeDispatch = true;
       composer.setAttribute("data-plannotator-queued-send", item.id);
-      try { send.click(); } finally { this.nativeDispatch = false; composer.removeAttribute("data-plannotator-queued-send"); }
-      const deadline = Date.now() + 15000;
+      try { send.click(); } finally {
+        this.nativeDispatch = false; this.nativeReplay.finishInitial();
+        composer.removeAttribute("data-plannotator-queued-send");
+      }
       while (!this.abort.signal.aborted && Date.now() < deadline && key === this.syncRoute()) {
         const posted = getVisibleUserMessages().find(message => !before.has(message.id) && normalize(message.text) === normalize(item!.text));
         if (posted) {
@@ -544,6 +574,7 @@ export class MessageQueue {
       }
       this.error = this.describe(error);
     } finally {
+      this.nativeReplay.finish();
       // Releasing a failed claim broadcasts a change and clearing its draft
       // emits input. Neither should immediately retry the same failed fill.
       // Successful sends have no cooldown; only pre-send failures back off.
@@ -565,10 +596,41 @@ export class MessageQueue {
       case "steer": if (id) await this.dispatch(id); break;
       case "save": await this.saveEdit(); break;
       case "cancel-edit": await this.cancelEdit(); break;
-      case "retry": if (id) await this.change("retry", { id }); break;
+      case "retry": if (id) await this.retryItem(id); break;
       case "resolve": if (id) await this.change("remove", { id }); break;
       case "check": this.error = ""; this.lastPoll = 0; await this.tick(); break;
     }
+  }
+
+  private async retryItem(id: string): Promise<void> {
+    if (this.saving || this.dispatching || this.editing || this.editingBusy) return;
+    const key = this.syncRoute();
+    const item = this.state?.items.find(entry => entry.id === id);
+    if (!key || item?.status !== "review") return;
+    const composer = findQueueComposer();
+    const text = composer ? readComposer(composer) : "";
+    const matchingDraft = Boolean(composer && text === item.text && !hasComposerAttachments());
+    // A failed send can leave this exact queued text in the native editor.
+    // Reuse its saved ID if clearing fails or the retry response is lost.
+    if (matchingDraft) this.pendingSave = { id, key, text };
+    this.saving = true; this.error = ""; this.render();
+    try {
+      const result = await this.request("retry", { id }, key);
+      if (key !== this.syncRoute()) return;
+      const retried = result.state.items.find(entry => entry.id === id);
+      const current = this.state?.items.find(entry => entry.id === id);
+      if (retried?.status !== "queued" || retried.text !== item.text || current?.status !== "queued" || current.text !== item.text) {
+        throw new Error("This message changed while retrying. Your draft was kept.");
+      }
+      this.error = "";
+      if (matchingDraft && composer?.isConnected && findQueueComposer() === composer &&
+          readComposer(composer) === text && !hasComposerAttachments()) {
+        if (writeComposer(composer, "")) this.pendingSave = null;
+        else this.error = "Message is queued again. Clear the composer to continue.";
+      }
+    } catch (error) {
+      if (key === this.syncRoute()) this.error = this.describe(error);
+    } finally { this.saving = false; this.render(); this.scheduleTick(); }
   }
 
   private async saveEdit(): Promise<void> {
@@ -722,7 +784,7 @@ export class MessageQueue {
     const status = item.status === "editing" ? "Editing in a composer · position reserved" : item.status === "claimed" ? "Preparing…" : item.status === "sending" ? "Confirming send…" : item.status === "review" ? "Send unconfirmed · check this chat before retrying" : "";
     const order = pending ? `<button class="order-slot drag-handle" draggable="true" aria-label="Reorder message ${index + 1}" title="Drag to reorder; use arrow keys when focused"><span class="num" aria-hidden="true">${index + 1}</span>${grip}</button>` : `<span class="order-slot"><span class="num">${index + 1}</span></span>`;
     return `<li data-id="${id}" data-user-message-id="${escapeHtml(item.userMessageId ?? "")}">${order}<div class="body"><div class="text">${escapeHtml(item.text)}</div>${status ? `<div class="status ${item.status === "review" ? "review" : ""}">${status}</div>` : ""}
-      ${item.status === "review" ? `<div class="edit-tools"><button data-action="retry" title="Retry only after checking that it was not sent">Retry message</button><button data-action="resolve">Dismiss from queue</button></div>` : ""}</div>
+      ${item.status === "review" ? `<div class="edit-tools"><button data-action="retry" title="Retry only after checking that it was not sent" ${this.saving || this.dispatching || this.editing || this.editingBusy ? "disabled" : ""}>Retry message</button><button data-action="resolve">Dismiss from queue</button></div>` : ""}</div>
       ${pending ? `<div class="tools"><button data-action="steer" aria-label="Send message ${index + 1} now" title="Send now · stop the current response first" ${blocked ? "disabled" : ""}>${icon("send")}</button><button data-action="edit" aria-label="Edit message ${index + 1}" title="Edit in composer" ${blocked ? "disabled" : ""}>${icon("edit")}</button><button data-action="remove" aria-label="Remove message ${index + 1}" title="Delete queued message">${icon("trash")}</button></div>` : ""}</li>`;
   }
 

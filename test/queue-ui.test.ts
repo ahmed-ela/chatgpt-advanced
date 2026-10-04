@@ -170,6 +170,19 @@ async function editInComposer(tab: Tab, id: string): Promise<void> {
   await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status === "editing" && Boolean(tab.composer.innerText), "queue edit reservation and composer fill");
 }
 
+async function savedReview(text: string, paused = false): Promise<string> {
+  const id = crypto.randomUUID();
+  const apply = (action: QueueRequest["action"], extra: Partial<QueueRequest> = {}) => store.apply({
+    type: QUEUE_MESSAGE_TYPE, key, clientId: "previous-tab", action, id, ...extra,
+  }, "previous-tab", now);
+  await apply("enqueue", { text });
+  await apply("claim");
+  await apply("attempt");
+  await apply("review", { reason: "Could not confirm the send" });
+  if (paused) await apply("pause", { paused: true });
+  return id;
+}
+
 function simulateNativeChat(tab: Tab): { sent: string[]; stops: number; finish: () => void } {
   const result = { sent: [] as string[], stops: 0, finish: () => {} };
   let pendingAnswer: HTMLElement | null = null;
@@ -198,7 +211,426 @@ function simulateNativeChat(tab: Tab): { sent: string[]; stops: number; finish: 
   return result;
 }
 
+// Model the installed model-selector extension: a document capture listener
+// cancels the original click, awaits a background decision, then clicks the
+// same button with a one-shot bypass of its own interceptor.
+function delayedSendInterceptor(tab: Tab): { canceled: Event[]; replay: () => void } {
+  const canceled: Event[] = [];
+  let bypass = false;
+  tab.doc.addEventListener("click", event => {
+    if (!event.composedPath().includes(tab.action)) return;
+    if (bypass) { bypass = false; return; }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    canceled.push(event);
+  }, { capture: true });
+  return { canceled, replay() { bypass = true; try { tab.action.click(); } finally { bypass = false; } } };
+}
+
+function wrapComposerInForm(tab: Tab): HTMLFormElement {
+  const form = tab.doc.createElement("form");
+  const body = tab.composer.closest("[data-composer-body]")!;
+  body.before(form); form.append(body);
+  tab.action.type = "submit";
+  // Keep this browserless fixture's native form default action local.
+  form.addEventListener("submit", event => event.preventDefault());
+  return form;
+}
+
+function postUserBubble(tab: Tab, text: string): void {
+  const userId = crypto.randomUUID();
+  const article = tab.doc.createElement("article");
+  article.setAttribute("data-chatgpt-search-unit-key", `${userId}:user`);
+  article.setAttribute("data-chatgpt-search-message-ids", userId);
+  const bubble = tab.doc.createElement("div");
+  bubble.setAttribute("data-user-message-bubble", "");
+  bubble.textContent = text;
+  article.append(bubble); tab.doc.querySelector("main")!.append(article);
+}
+
 describe("Persistent message queue UI", () => {
+  test("a canceled queued click permits the model extension's delayed replay exactly once", async () => {
+    const tab = await createTab();
+    wrapComposerInForm(tab);
+    const id = await enqueue(tab, "Follow up through the asynchronous model gate");
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "model extension canceled initial send");
+    expect(gate.canceled[0]!.defaultPrevented).toBe(true);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    expect(native.sent).toEqual([]);
+    // This task boundary is the important distinction from the original click.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    gate.replay();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "delayed native replay acknowledged", 350);
+    expect(native.sent).toEqual(["Follow up through the asynchronous model gate"]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+  });
+
+  test.each(["native default", "direct delayed same submitter", "direct delayed null submitter"] as const)("a delayed replay permits one %s form submission", async mode => {
+    const tab = await createTab();
+    const form = wrapComposerInForm(tab);
+    const text = "The authorized replay may submit its own form once";
+    const id = await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    let submissions = 0;
+    form.addEventListener("submit", () => { submissions++; });
+    const directSubmit = () => {
+      const event = new tab.dom.SubmitEvent("submit", {
+        bubbles: true, cancelable: true,
+      });
+      // requestSubmit() creates a browser-dispatched submit event even
+      // when called by script; trust alone cannot identify a user gesture.
+      Object.defineProperties(event, {
+        isTrusted: { value: true },
+        submitter: { value: mode === "direct delayed null submitter" ? null : tab.action },
+      });
+      form.dispatchEvent(event as unknown as SubmitEvent);
+    };
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "model gate initial cancellation");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (mode === "native default") { gate.replay(); form.requestSubmit(tab.action); }
+    else { directSubmit(); directSubmit(); }
+    expect(submissions).toBe(1);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    postUserBubble(tab, text);
+    await waitFor(() => !tab.queue.dispatching, "form delivery acknowledged", 350);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    directSubmit();
+    expect(submissions).toBe(1);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test.each(["input event", "DOM mutation only"] as const)("a delayed click replay cannot send a draft changed and restored through %s", async signal => {
+    const tab = await createTab();
+    const text = "Original queued text";
+    const id = await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    const editDraft = (value: string) => {
+      if (signal === "input event") draft(tab, value);
+      else tab.composer.textContent = value;
+    };
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    editDraft("New typing must not be sent by an old click");
+    editDraft(text);
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerText).toBe(text);
+    editDraft("New typing must not be sent by an old click");
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerText).toBe("New typing must not be sent by an old click");
+    editDraft(text);
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+  });
+
+  test.each(["/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "/"])("a delayed click replay remains blocked after navigation to %s", async route => {
+    const tab = await createTab();
+    const text = "Only send in the original conversation";
+    await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    tab.dom.location.href = `https://chatgpt.com${route}`;
+    if (route === "/") {
+      tab.doc.querySelector("main")!.replaceChildren();
+      tab.doc.querySelector("main")!.removeAttribute("data-chatgpt-selection-conversation-id");
+    } else tab.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerText).toBe(text);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    // A route reset must not turn this stale replay into an ordinary first send.
+    await waitFor(() => !tab.queue.dispatching, "old dispatch ends after route change");
+    gate.replay();
+    expect(native.sent).toEqual([]);
+  });
+
+  test("a delayed click replay is bound to the original composer form", async () => {
+    const tab = await createTab();
+    const original = wrapComposerInForm(tab);
+    await enqueue(tab, "Do not replay into a replacement form");
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    const replacement = tab.doc.createElement("form");
+    original.before(replacement);
+    replacement.append(tab.composer.closest("[data-composer-body]")!);
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerText).toBe("Do not replay into a replacement form");
+  });
+
+  test("a delayed replay expires and leaves its unconfirmed draft saved for review", async () => {
+    const tab = await createTab();
+    const text = "An old replay must not fire after the acknowledgement deadline";
+    const id = await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    Object.defineProperty(tab.dom, "Date", { value: class extends Date {
+      static override now(): number { return Date.now() + 16_000; }
+    }, configurable: true });
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    await waitFor(() => !tab.queue.dispatching, "expired delivery requires review", 600);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("review");
+    expect(tab.composer.innerText).toBe(text);
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test.each(["click", "Enter"] as const)("a trusted physical %s during the attempt revokes its delayed replay without a duplicate send", async activation => {
+    const tab = await createTab();
+    await enqueue(tab, "One owned send is already awaiting the model extension");
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    const event = activation === "click"
+      ? new tab.dom.MouseEvent("click", { bubbles: true, composed: true, cancelable: true })
+      : new tab.dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true, cancelable: true });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    const target = activation === "click" ? tab.action : tab.composer;
+    target.dispatchEvent(event as unknown as Event);
+    expect(event.defaultPrevented).toBe(true);
+    gate.replay();
+    expect(native.sent).toEqual([]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+  });
+
+  test("a replay click does not grant a third-stage submit in a later task", async () => {
+    const tab = await createTab();
+    const form = wrapComposerInForm(tab);
+    tab.action.type = "button";
+    await enqueue(tab, "The replay only carries its synchronous native default action");
+    const gate = delayedSendInterceptor(tab);
+    let clicks = 0;
+    let submissions = 0;
+    tab.action.addEventListener("click", () => { clicks++; });
+    form.addEventListener("submit", () => { submissions++; });
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    gate.replay();
+    expect(clicks).toBe(1);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const event = new tab.dom.SubmitEvent("submit", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    form.dispatchEvent(event as unknown as SubmitEvent);
+    expect(submissions).toBe(0);
+  });
+
+  test("a direct delayed submit with another submitter cannot consume the queued message", async () => {
+    const tab = await createTab();
+    const form = wrapComposerInForm(tab);
+    const text = "Only the captured Send button may submit this queued draft";
+    await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    let submissions = 0;
+    form.addEventListener("submit", () => { submissions++; });
+    const other = tab.doc.createElement("button");
+    other.type = "submit"; other.textContent = "Another action"; form.append(other);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    form.requestSubmit(other);
+    expect(submissions).toBe(0);
+    expect(tab.composer.innerText).toBe(text);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test("only one delayed replay passes while its user bubble is still pending", async () => {
+    const tab = await createTab();
+    const text = "A single delayed activation before acknowledgement";
+    const id = await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    let nativeClicks = 0;
+    // Leave the exact draft and button intact until the server's optimistic
+    // bubble arrives, so a second click could otherwise duplicate the message.
+    tab.action.addEventListener("click", () => { nativeClicks++; });
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial canceled click");
+    gate.replay();
+    gate.replay();
+    expect(nativeClicks).toBe(1);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+    const postedId = "33333333-4444-4555-8666-777777777777";
+    tab.doc.querySelector("main")!.insertAdjacentHTML("beforeend", `<article data-chatgpt-search-unit-key="${postedId}:user" data-chatgpt-search-message-ids="${postedId}"><div data-user-message-bubble>${text}</div></article>`);
+    await waitFor(() => !tab.queue.dispatching, "replay acknowledged");
+    gate.replay();
+    expect(nativeClicks).toBe(1);
+  });
+
+  test("an uncanceled queued click never grants an additional asynchronous activation", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "No replay allowance without a canceled first click");
+    let nativeClicks = 0;
+    tab.action.addEventListener("click", () => { nativeClicks++; });
+    busy(tab, false);
+    await waitFor(() => nativeClicks === 1, "original native click");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    tab.action.click();
+    expect(nativeClicks).toBe(1);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+  });
+
+  test("a canceled initial click which already submitted its form never grants another send", async () => {
+    const tab = await createTab();
+    const form = wrapComposerInForm(tab);
+    await enqueue(tab, "A canceled click is not replay permission after a submit was observed");
+    let submissions = 0;
+    let originalCanceled = false;
+    let targetClicks = 0;
+    form.addEventListener("submit", () => { submissions++; });
+    tab.action.addEventListener("click", () => { targetClicks++; });
+    tab.doc.addEventListener("click", event => {
+      if (!event.composedPath().includes(tab.action) || originalCanceled) return;
+      form.requestSubmit(tab.action);
+      originalCanceled = true;
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
+    busy(tab, false);
+    await waitFor(() => originalCanceled, "initial click submitted before cancellation");
+    expect(submissions).toBe(1);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    tab.action.click();
+    expect(targetClicks).toBe(0);
+    expect(submissions).toBe(1);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test("Retry clears its matching retained draft after commit and sends the same item once", async () => {
+    const text = "what are parameter values?";
+    const id = await savedReview(text);
+    const tab = await createTab({ idle: true });
+    const native = simulateNativeChat(tab);
+    draft(tab, text);
+    button(tab, "retry", id).click();
+    await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status !== "review", "durable retry");
+    expect(tab.composer.innerText).toBe("");
+    await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status === "waiting", "retried send acknowledgement");
+    expect(native.sent).toEqual([text]);
+    expect((await persisted()).items.map(item => item.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "retry")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(0);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test("Retry waits for its durable response, preserves pause, and ignores repeat clicks", async () => {
+    const text = "Keep this queued until Resume";
+    const id = await savedReview(text, true);
+    const tab = await createTab({ idle: true });
+    const native = simulateNativeChat(tab);
+    draft(tab, text);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let committed = false;
+    tab.after = async request => { if (request.action === "retry") { committed = true; await gate; } };
+    button(tab, "retry", id).click();
+    await waitFor(() => committed, "retry database commit");
+    button(tab, "retry", id).click();
+    expect(tab.composer.innerText).toBe(text);
+    expect(native.sent).toEqual([]);
+    release();
+    await waitFor(() => !tab.queue.saving, "retry response handled");
+    expect(tab.composer.innerText).toBe("");
+    expect((await persisted()).paused).toBe(true);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
+    expect(tab.requests.filter(request => request.action === "retry")).toHaveLength(1);
+    expect(native.sent).toEqual([]);
+    button(tab, "pause").click();
+    await waitFor(() => native.sent.length === 1, "explicit Resume");
+    expect(native.sent).toEqual([text]);
+  });
+
+  test("a failed Retry keeps its review item and retained draft", async () => {
+    const text = "Do not lose this draft";
+    const id = await savedReview(text);
+    const tab = await createTab({ idle: true });
+    draft(tab, text);
+    tab.before = request => { if (request.action === "retry") throw new Error("Retry storage unavailable"); };
+    button(tab, "retry", id).click();
+    await waitFor(() => tab.shadow.textContent!.includes("Retry storage unavailable"), "visible retry failure");
+    expect(tab.composer.innerText).toBe(text);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "review"]]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+  });
+
+  test.each(["different draft", "new typing", "route", "composer", "attachment"] as const)("Retry preserves %s while resetting only the original saved item", async change => {
+    const text = "Original retained text";
+    const id = await savedReview(text, true);
+    const tab = await createTab({ idle: true });
+    draft(tab, change === "different draft" ? "Unrelated draft" : text);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let committed = false;
+    tab.after = async request => { if (request.action === "retry") { committed = true; await gate; } };
+    button(tab, "retry", id).click();
+    await waitFor(() => committed, "retry commit before delayed response");
+    if (change === "new typing") draft(tab, "New typing during retry");
+    if (change === "route") tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    if (change === "composer") {
+      const replacement = tab.composer.cloneNode(true) as HTMLElement;
+      tab.composer.replaceWith(replacement); tab.composer = replacement;
+    }
+    if (change === "attachment") tab.composer.closest("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<div data-file-id="new-attachment">New file</div>');
+    const expectedDraft = tab.composer.innerText;
+    release();
+    await waitFor(() => !tab.queue.saving, "retry completion");
+    expect(tab.composer.innerText).toBe(expectedDraft);
+    expect((await persisted()).items.map(item => [item.id, item.text, item.status])).toEqual([[id, text, "queued"]]);
+    expect((await persisted()).paused).toBe(true);
+  });
+
+  test("Retry with a composer that refuses to clear cannot append a duplicate on Enter", async () => {
+    const text = "Saved item with a retained duplicate draft";
+    const id = await savedReview(text, true);
+    const tab = await createTab({ idle: true });
+    draft(tab, text);
+    Object.defineProperty(tab.doc, "execCommand", { value: () => true, configurable: true });
+    button(tab, "retry", id).click();
+    await waitFor(() => tab.queue.state?.items[0]?.status === "queued" && !tab.queue.saving, "retry retained after failed clear");
+    expect(tab.composer.innerText).toBe(text);
+    expect(tab.shadow.textContent).toContain("Clear the composer to continue");
+    enter(tab);
+    await waitFor(() => !tab.queue.saving, "idempotent retained-draft enqueue");
+    expect((await persisted()).items.map(item => item.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "enqueue").every(request => request.id === id)).toBe(true);
+  });
+
+  test("a lost Retry response preserves the draft and subsequent Enter keeps the same saved ID", async () => {
+    const text = "Retry committed but its reply was lost";
+    const id = await savedReview(text, true);
+    const tab = await createTab({ idle: true });
+    draft(tab, text);
+    tab.after = request => { if (request.action === "retry") throw new Error("Lost retry response"); };
+    button(tab, "retry", id).click();
+    await waitFor(() => !tab.queue.saving && tab.shadow.textContent!.includes("Lost retry response"), "lost retry reply");
+    expect(tab.composer.innerText).toBe(text);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
+    enter(tab);
+    await waitFor(() => !tab.queue.saving, "same-ID draft recovery");
+    expect(tab.composer.innerText).toBe("");
+    expect((await persisted()).items.map(item => item.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "enqueue").map(request => request.id)).toEqual([id]);
+  });
+
   test.each(["Enter", "click"] as const)("queues %s during ChatGPT initial response after typing replaces Stop with Send", async activation => {
     const tab = await createTab();
     tab.action.setAttribute("aria-label", "Stop");
@@ -719,16 +1151,39 @@ describe("Persistent message queue UI", () => {
     const tab = await createTab();
     const id = await enqueue(tab, "Keep saved if the editor rejects insertion");
     const native = simulateNativeChat(tab);
-    Object.defineProperty(tab.doc, "execCommand", { value: () => true, configurable: true });
+    const clock = { now: Date.now() };
+    Object.assign(tab.dom, { Date: class extends Date { static override now() { return clock.now; } } });
+    let fillAttempts = 0;
+    Object.defineProperty(tab.doc, "execCommand", { value: () => { fillAttempts++; return true; }, configurable: true });
     busy(tab, false);
-    await waitFor(() => tab.requests.some(request => request.action === "release" && request.id === id), "failed fill releases its claim");
+    await waitFor(() => tab.requests.some(request => request.action === "release" && request.id === id) &&
+      !tab.queue.dispatching && !tab.queue.polling, "failed fill completes and releases its claim");
+    // A heartbeat can still report busy while the DOM becomes idle, causing a
+    // harmless rejected claim before the successful one. Only new claims after
+    // the failed fill would indicate that broadcasts bypass its cooldown.
+    const claimsAfterFailure = tab.requests.filter(request => request.action === "claim").length;
+    expect(fillAttempts).toBe(1);
     tab.listener?.({ type: "plannotator:queue:changed", key });
     tab.composer.dispatchEvent(new tab.dom.InputEvent("input", { bubbles: true, composed: true }) as unknown as InputEvent);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    expect(tab.requests.filter(request => request.action === "claim")).toHaveLength(1);
+    await poll(tab);
+    clock.now += 999;
+    await poll(tab);
+    expect(tab.requests.filter(request => request.action === "claim")).toHaveLength(claimsAfterFailure);
+    expect(fillAttempts).toBe(1);
+    expect(tab.requests.filter(request => request.action === "release" && request.id === id)).toHaveLength(1);
     expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
     expect((await persisted()).items.find(item => item.id === id)?.status).toBe("queued");
     expect(tab.composer.innerText).toBe("");
+    expect(native.sent).toEqual([]);
+    // Recovery remains enabled after the full cooldown; the saved item is
+    // retried once without creating a second item or attempting a native send.
+    clock.now += 1;
+    await poll(tab);
+    expect(fillAttempts).toBe(2);
+    expect(tab.requests.filter(request => request.action === "claim")).toHaveLength(claimsAfterFailure + 1);
+    expect(tab.requests.filter(request => request.action === "release" && request.id === id)).toHaveLength(2);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
     expect(native.sent).toEqual([]);
   });
 

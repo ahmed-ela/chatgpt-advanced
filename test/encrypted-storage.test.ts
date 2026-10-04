@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
+import { IDBDatabase as TestDatabase, IDBFactory, IDBObjectStore, forceCloseDatabase } from "fake-indexeddb";
 import { AnnotationStore, ANNOTATION_MESSAGE_TYPE, type PersistedNoteItem } from "../src/annotation-store";
 import { QueueStore, QUEUE_MESSAGE_TYPE } from "../src/queue-store";
+import { EncryptedRecordStore } from "../src/encrypted-storage";
 
 let factory: IDBFactory;
 let opened: Array<{ close(): Promise<void> }>;
@@ -66,6 +67,17 @@ async function legacy(name: string, table: string, values: unknown[]): Promise<v
 }
 function legacyQueue(otherKey = key) { return { key: otherKey, revision: 3, paused: true,
   items: [{ id: "private-message", text: queueText, createdAt: 1, status: "queued" }] }; }
+
+function trackConnections(): IDBDatabase[] {
+  const connections: IDBDatabase[] = [];
+  const original = factory.open.bind(factory);
+  factory.open = (...args: Parameters<typeof original>) => {
+    const request = original(...args);
+    request.addEventListener("success", () => connections.push(request.result));
+    return request;
+  };
+  return connections;
+}
 
 describe("encrypted durable queue and notes", () => {
   test("stores only opaque record IDs/ciphertext, with nonextractable AES-256 keys", async () => {
@@ -245,5 +257,115 @@ describe("encrypted durable queue and notes", () => {
       release(); await pending;
       expect((await readQueue()).state.items).toHaveLength(2);
     } finally { release?.(); crypto.subtle.encrypt = original; }
+  });
+
+  test("unexpected close reopens the cached store and late old-handle events cannot evict its replacement", async () => {
+    const connections = trackConnections();
+    const store = queue(); await enqueue(store);
+    const [beforeKey] = await raw(queueName, "encryption-keys");
+    const old = connections[0]!;
+    const staleClose = old.onclose;
+    const staleVersionChange = old.onversionchange;
+    const closed = new Promise<void>(resolve => old.addEventListener("close", () => resolve(), { once: true }));
+    // fake-indexeddb's helper accepts an instance; its published type says constructor.
+    (forceCloseDatabase as unknown as (database: IDBDatabase) => void)(old);
+    await closed;
+    const beforeReopen = connections.length;
+    expect((await readQueue(store)).state.items.map(item => item.id)).toEqual(["private-message"]);
+    expect(connections).toHaveLength(beforeReopen + 1);
+    expect(typeof staleClose).toBe("function");
+    expect(typeof staleVersionChange).toBe("function");
+    staleClose!.call(old, new Event("close"));
+    staleVersionChange!.call(old, new Event("versionchange") as IDBVersionChangeEvent);
+    await enqueue(store, "after-close");
+    expect((await readQueue(store)).state.items.map(item => item.id)).toEqual(["private-message", "after-close"]);
+    expect(connections).toHaveLength(beforeReopen + 1);
+    const [afterKey] = await raw(queueName, "encryption-keys");
+    expect(afterKey.token).toBe(beforeKey.token);
+    expect(afterKey.key.extractable).toBe(false);
+    expect(afterKey.key.algorithm).toEqual({ name: "AES-GCM", length: 256 });
+  });
+
+  test("simultaneous requests recover a silently closed connection through one fresh open", async () => {
+    const connections = trackConnections();
+    const store = queue(); await enqueue(store);
+    // Normal close emits no close event, exercising the transaction-creation boundary.
+    connections[0]!.close();
+    await Promise.all([enqueue(store, "second"), enqueue(store, "third"), readQueue(store)]);
+    expect(connections).toHaveLength(2);
+    expect((await readQueue(store)).state.items.map(item => item.id).sort()).toEqual(["private-message", "second", "third"]);
+  });
+
+  test("closure during encryption reloads a fresh snapshot before one durable non-idempotent mutation", async () => {
+    const connections = trackConnections();
+    type Counter = { key: string; count: number };
+    const store = new EncryptedRecordStore<Counter>(factory, queueName, "queues");
+    const peer = new EncryptedRecordStore<Counter>(factory, queueName, "queues");
+    opened.push(store, peer);
+    const increment = (target: EncryptedRecordStore<Counter>) => target.apply(key, () => ({ key, count: 0 }), value => ({
+      value: { ...value, count: value.count + 1 }, result: value.count + 1, changed: true,
+    }));
+    expect(await increment(store)).toBe(1);
+    const original = crypto.subtle.encrypt.bind(crypto.subtle);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let intercepted = false;
+    try {
+      crypto.subtle.encrypt = async (...args: Parameters<typeof original>) => {
+        if (!intercepted) { intercepted = true; entered(); await gate; }
+        return original(...args);
+      };
+      const pending = increment(store);
+      await started;
+      connections[0]!.close();
+      expect(await increment(peer)).toBe(2);
+      release();
+      expect(await pending).toBe(3);
+    } finally { release?.(); crypto.subtle.encrypt = original; }
+    const count = await store.apply(key, () => ({ key, count: 0 }), value => ({ value, result: value.count, changed: false }));
+    expect(count).toBe(3);
+    expect(connections).toHaveLength(3);
+  });
+
+  test.each(["InvalidStateError inside a transaction", "abort after put"] as const)("does not replay %s", async failure => {
+    const connections = trackConnections();
+    const store = queue(); await enqueue(store);
+    const original = IDBObjectStore.prototype.put;
+    let writes = 0;
+    try {
+      IDBObjectStore.prototype.put = function (...args: Parameters<typeof original>) {
+        if (this.name !== "encrypted-records") return original.apply(this, args);
+        writes++;
+        if (failure === "InvalidStateError inside a transaction") throw new DOMException("Synthetic active-transaction failure", "InvalidStateError");
+        const request = original.apply(this, args);
+        this.transaction.abort();
+        return request;
+      };
+      await expect(enqueue(store, "must-not-commit")).rejects.toThrow(failure === "abort after put"
+        ? "Storage transaction failed" : "Synthetic active-transaction failure");
+    } finally { IDBObjectStore.prototype.put = original; }
+    expect(writes).toBe(1);
+    expect(connections).toHaveLength(1);
+    expect((await readQueue(store)).state.items.map(item => item.id)).toEqual(["private-message"]);
+  });
+
+  test("repeated closure before transaction creation retries once, preserves data, and permits a later explicit retry", async () => {
+    const connections = trackConnections();
+    const store = queue(); await enqueue(store);
+    const original = TestDatabase.prototype.transaction;
+    let starts = 0;
+    try {
+      TestDatabase.prototype.transaction = function (...args: Parameters<typeof original>) {
+        if (this.name === queueName) { starts++; this.close(); }
+        return original.apply(this, args);
+      };
+      await expect(enqueue(store, "never-committed")).rejects.toMatchObject({ name: "InvalidStateError" });
+    } finally { TestDatabase.prototype.transaction = original; }
+    expect(starts).toBe(2);
+    expect(connections).toHaveLength(2);
+    expect((await readQueue(store)).state.items.map(item => item.id)).toEqual(["private-message"]);
+    expect(connections).toHaveLength(3);
   });
 });
