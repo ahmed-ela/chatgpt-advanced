@@ -523,8 +523,10 @@ describe("Persistent message queue UI", () => {
     draft(tab, text);
     button(tab, "retry", id).click();
     await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status !== "review", "durable retry");
-    expect(tab.composer.innerText).toBe("");
     await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status === "waiting", "retried send acknowledgement");
+    // Auto-dispatch may refill the cleared composer immediately after Retry.
+    // Its acknowledged send is the stable boundary for the final empty draft.
+    expect(tab.composer.innerText).toBe("");
     expect(native.sent).toEqual([text]);
     expect((await persisted()).items.map(item => item.id)).toEqual([id]);
     expect(tab.requests.filter(request => request.action === "retry")).toHaveLength(1);

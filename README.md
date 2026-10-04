@@ -1,6 +1,6 @@
 # Threadlane
 
-A Manifest V3 Chrome extension for annotating assistant responses and queuing follow-ups on ChatGPT (`chatgpt.com`), Claude (`claude.ai`), and Gemini (`gemini.google.com`). The extension is named **Threadlane** (formerly Plannotator ChatGPT Notes). Existing internal storage identifiers are retained so renaming an existing installation preserves its saved data.
+A Manifest V3 extension for Chrome and Firefox desktop, for annotating assistant responses and queuing follow-ups on ChatGPT (`chatgpt.com`), Claude (`claude.ai`), and Gemini (`gemini.google.com`). The extension is named **Threadlane** (formerly Plannotator ChatGPT Notes). Existing internal storage identifiers are retained so renaming an existing installation preserves its saved data. Firefox requires version 140 or later; see [Firefox packaging and testing](store/FIREFOX.md).
 
 ## What It Does
 
@@ -9,8 +9,8 @@ A Manifest V3 Chrome extension for annotating assistant responses and queuing fo
 - Insert the generated revision prompt into the chat's native composer
 - Queue text messages while the assistant is responding, using Enter or **Queue message**
 - Hover a queued message to fade its number into a six-dot drag handle, then drag it to reorder; edit/remove messages and pause/resume sending
-- Share one durable queue per conversation across tabs in the same Chrome profile
-- Hot-reload during development without manually reloading the extension each edit
+- Share one durable queue per conversation across tabs in the same browser profile
+- Hot-reload Chrome during development without manually reloading the extension each edit
 
 Interface icons use [Lucide](https://lucide.dev/), bundled locally with consistent SVG strokes. Its license notices are included in `dist/THIRD_PARTY_NOTICES.txt`.
 
@@ -18,7 +18,7 @@ Interface icons use [Lucide](https://lucide.dev/), bundled locally with consiste
 
 Saved annotations live in the extension's own IndexedDB database and remain until you explicitly delete them. Note and queue records are encrypted with AES-256-GCM using keys stored locally in the extension; the privacy policy describes the protection and recovery limits. Inserting a revision prompt or sending a native/queued message keeps your notes. Insertion requires an empty composer without attachments. Notes saved by older versions in the supported site's local storage are imported into extension storage; the old copy is removed only after a successful import. A failed save/import keeps the source and shows a retryable error.
 
-Notes and queues stay in the current Chrome profile and work across its tabs. There is no publisher cloud storage, analytics, device sync, or built-in export. Queued messages are submitted through the chosen provider's normal composer. Removing the extension or clearing its storage removes its databases. See [PRIVACY.md](PRIVACY.md) for data categories, legacy storage, provider submissions, and the queue's bounded edited-message recovery records. Chrome's extension Options link opens a packaged offline copy of the policy.
+Notes and queues stay in the current browser profile and work across its tabs. There is no publisher cloud storage, analytics, device sync, or built-in export. Chrome and Firefox installations keep separate databases. Queued messages are submitted through the chosen provider's normal composer. Removing the extension or clearing its storage removes its databases. See [PRIVACY.md](PRIVACY.md) for data categories, legacy storage, provider submissions, and the queue's bounded edited-message recovery records. The extension's Options link opens a packaged offline copy of the policy.
 
 ## Message queue
 
@@ -28,7 +28,7 @@ Messages send in order as soon as the assistant's completed response and native 
 
 Each queued message has **Send now**, **Edit** (pencil), and **Delete** (trash) controls. Send now stops the current response, if necessary, and sends the selected message once; other messages keep their relative order, and the queue keeps its pause/resume preference. It requires an empty composer. The pencil loads the saved text into the native composer while reserving that same queue slot across tabs. Press Enter, native Send, or **Save edit** to save the revision back into its original position. **Cancel edit** restores the original saved text and clears that edit from the composer. Existing composer drafts are never overwritten. If an editing tab disappears, the original saved message stays in the queue and the queue pauses when its editing reservation expires.
 
-The extension stores queues in its own IndexedDB database with strict transaction durability. Queued messages, order, saved edits, and pause state survive page reloads, tab closures, worker restarts, and browser restarts in the same profile. Edits in an open queue editor are not persisted until you press Enter, click native Send, or click Save edit. Reopen the conversation to continue; the extension cannot send while Chrome or every tab for that conversation is closed. This is local persistence, not sync between devices or Chrome profiles. Removing the extension or clearing its storage removes queues.
+The extension stores queues in its own IndexedDB database with strict transaction durability. Queued messages, order, saved edits, and pause state survive page reloads, tab closures, background restarts, and browser restarts in the same profile and installation. Edits in an open queue editor are not persisted until you press Enter, click native Send, or click Save edit. Reopen the conversation to continue; the extension cannot send while the browser or every tab for that conversation is closed. This is local persistence, not sync between browsers, devices, or profiles. Removing the extension or clearing its storage removes queues. Firefox temporary add-ons are removed when Firefox exits; a signed installation is required for normal use across browser restarts.
 
 Multiple tabs coordinate through atomic claims in the background worker. A message is marked as attempted **before** clicking the native send control. It is acknowledged only after a new user message with the expected text and a stable message ID appears. If delivery is uncertain, the stack stops on **Send unconfirmed** and retains the text. Check the chat, then retry or dismiss that item. Automatic retries are intentionally limited to claims that never reached the send-attempt stage.
 
@@ -48,6 +48,9 @@ bun test test/chatgpt-dom.test.ts test/queue-ui.test.ts
 bun run e2e
 bun run e2e:dev-reload
 bun run package:release
+bun run build:firefox
+bun run lint:firefox
+bun run package:firefox
 ```
 
 ## Load In Chrome
@@ -56,6 +59,15 @@ bun run package:release
 2. Open `chrome://extensions`
 3. Enable Developer Mode
 4. Load unpacked from `dist/`
+
+## Load in Firefox for development
+
+1. Run `bun run build:firefox`.
+2. In Firefox 140 or later, open `about:debugging#/runtime/this-firefox`.
+3. Choose **Load Temporary Add-on** and select `dist-firefox/manifest.json`.
+4. Open a supported conversation. If Firefox asks for site access, allow it for that provider.
+
+Temporary installation lasts until Firefox exits. The production Firefox ZIP must be signed by Mozilla before ordinary users can install it persistently. The Firefox build does not run in private browsing windows. See [store/FIREFOX.md](store/FIREFOX.md) for packaging, validation, and release requirements.
 
 ## Versioning and releases
 
@@ -91,7 +103,7 @@ Packaging requires Bun and the local `zip` command; the release tests also use `
 
 Packaging refuses to overwrite an existing candidate for the same version. To make another local candidate, use `bun run package:release --outdir <release-root>` or explicitly remove an obsolete candidate first. `bun run build --outdir <directory>` is also available for an isolated unpacked production build. Neither command uploads or publishes anything.
 
-Store materials are drafts in [store/LISTING.md](store/LISTING.md), [store/PRIVACY_FIELDS.md](store/PRIVACY_FIELDS.md), and [store/RELEASE_CHECKLIST.md](store/RELEASE_CHECKLIST.md). Public submission is authorized and the support contact is threadlane.support@gmail.com. The [public privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf) is hosted and the publisher dashboard is accessible. Publisher registration/payment, screenshots, and live production verification still need completion before submission. Review the encryption disclosures and final dashboard certifications against the tested build. A store installation with a different extension ID does not inherit extension-owned data from an unpacked development installation; this release has no database export/import tool. Avoid replacing a development install that still holds needed notes or queues.
+Chrome store materials are in [store/LISTING.md](store/LISTING.md), [store/PRIVACY_FIELDS.md](store/PRIVACY_FIELDS.md), and [store/RELEASE_CHECKLIST.md](store/RELEASE_CHECKLIST.md). Chrome 0.2.5 replaced 0.2.3 in public review on 2026-10-04 with automatic publication after approval; see [the recorded submission status](store/SUBMISSION_STATUS.md). Submission is not evidence of approval or public availability. The Firefox port is a separate release candidate and has not been submitted to Mozilla. The support contact is threadlane.support@gmail.com. The [public privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf) describes the Chrome release; update it from this branch's policy before publishing Firefox. Review the encryption disclosures and final dashboard certifications against the tested build. A store installation with a different extension ID does not inherit extension-owned data from an unpacked development installation; this release has no database export/import tool. Avoid replacing a development install that still holds needed notes or queues.
 
 ## One-command development reload
 

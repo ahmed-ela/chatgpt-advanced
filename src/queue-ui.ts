@@ -1,5 +1,6 @@
 import { QUEUE_MESSAGE_TYPE, getQueueKey, type QueueItem, type QueueState } from "./queue-store";
 import { icon } from "./icons";
+import { getExtensionApi, type ExtensionRuntime } from "./browser-api";
 import { NativeReplayGuard } from "./native-replay-guard";
 import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
@@ -8,10 +9,7 @@ import {
   registerNewConversationAlias, clearConversationAlias, composerScope, getProviderName,
 } from "./chatgpt-dom";
 
-interface QueueRuntime {
-  sendMessage(message: unknown): Promise<unknown>;
-  onMessage?: { addListener(listener: (message: { type?: string; key?: string }) => void): void };
-}
+type QueueRuntime = Pick<ExtensionRuntime, "sendMessage" | "onMessage">;
 
 const ROOT = "plannotator-message-queue";
 const POLL_MS = 900;
@@ -200,7 +198,9 @@ export class MessageQueue {
       if (from !== to && from >= 0 && to >= 0) void this.change("move", { id: fromId, delta: to - from });
     });
     this.shadow.addEventListener("dragend", () => this.clearDrag());
-    this.runtime.onMessage?.addListener(message => {
+    this.runtime.onMessage?.addListener(rawMessage => {
+      if (!rawMessage || typeof rawMessage !== "object") return;
+      const message = rawMessage as { type?: string; key?: string };
       if (message.type === "plannotator:queue:changed" && message.key === this.key) this.scheduleTick();
     });
     // React to native completion signals immediately; polling is only fallback.
@@ -806,5 +806,5 @@ export class MessageQueue {
   }
 }
 
-const runtime = (globalThis as typeof globalThis & { chrome?: { runtime?: QueueRuntime } }).chrome?.runtime;
+const runtime = getExtensionApi()?.runtime;
 if (window.top === window && runtime?.sendMessage) new MessageQueue(runtime).start();

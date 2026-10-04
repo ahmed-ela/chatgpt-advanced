@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { appDir, buildExtension, iconSizes, providerMatches } from "./build-lib";
+import { appDir, browserTarget, buildExtension, firefoxDataPermissions, firefoxExtensionId, firefoxMinimumVersion, iconSizes, parseBuildArguments, providerMatches, type BrowserTarget } from "./build-lib";
 import { readProjectVersion } from "./version";
 
 export interface ReleasePackage {
+  target: BrowserTarget;
   version: string;
   extensionDir: string;
   zipPath: string;
@@ -23,7 +24,8 @@ export async function releaseFiles(root: string, prefix = ""): Promise<string[]>
   return files.sort();
 }
 
-export async function validateReleaseExtension(directory: string, version: string): Promise<string[]> {
+export async function validateReleaseExtension(directory: string, version: string, target: BrowserTarget = "chrome"): Promise<string[]> {
+  browserTarget(target);
   const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"));
   if (manifest.version !== version || manifest.version_name !== undefined || manifest.manifest_version !== 3) {
     throw new Error("Release manifest version does not match the project release.");
@@ -32,9 +34,23 @@ export async function validateReleaseExtension(directory: string, version: strin
     throw new Error("Release manifest has unexpected permissions or external access.");
   }
   if (manifest.content_scripts?.length !== 1 || JSON.stringify(manifest.content_scripts[0].matches) !== JSON.stringify(providerMatches) ||
-      JSON.stringify(manifest.content_scripts[0].js) !== JSON.stringify(["content.js", "queue-ui.js"]) ||
-      manifest.background?.service_worker !== "queue-worker.js" || manifest.options_page !== "privacy.html") {
+      JSON.stringify(manifest.content_scripts[0].js) !== JSON.stringify(["content.js", "queue-ui.js"]) || manifest.options_page !== "privacy.html") {
     throw new Error("Release manifest must target only the three supported HTTPS providers.");
+  }
+  const expectedBackground = target === "firefox"
+    ? { scripts: ["queue-worker.js"] }
+    : { service_worker: "queue-worker.js", type: "module" };
+  if (JSON.stringify(manifest.background) !== JSON.stringify(expectedBackground)) {
+    throw new Error(`Release manifest has an invalid ${target} background configuration.`);
+  }
+  if (target === "firefox") {
+    const expectedSettings = { gecko: { id: firefoxExtensionId, strict_min_version: firefoxMinimumVersion,
+      data_collection_permissions: { required: firefoxDataPermissions } } };
+    if (JSON.stringify(manifest.browser_specific_settings) !== JSON.stringify(expectedSettings) || manifest.incognito !== "not_allowed") {
+      throw new Error("Firefox release requires its stable ID, minimum version, transmission consent, and private-browsing restriction.");
+    }
+  } else if (manifest.browser_specific_settings !== undefined) {
+    throw new Error("Chrome release must not contain Firefox-specific settings.");
   }
   const expectedFiles = ["manifest.json", "content.js", "queue-ui.js", "queue-worker.js", "privacy.html", "THIRD_PARTY_NOTICES.txt", ...iconSizes.map(size => `assets/icons/${size}.png`)].sort();
   const files = await releaseFiles(directory);
@@ -52,9 +68,11 @@ export async function validateReleaseExtension(directory: string, version: strin
 }
 
 /** Build an immutable local upload candidate without touching the installed dist/. */
-export async function packageExtension(options: { releaseRoot?: string } = {}): Promise<ReleasePackage> {
+export async function packageExtension(options: { target?: BrowserTarget; releaseRoot?: string } = {}): Promise<ReleasePackage> {
+  const target = browserTarget(options.target);
   const version = await readProjectVersion(appDir);
-  const releaseRoot = resolve(options.releaseRoot ?? join(appDir, ".local/release"));
+  const outputRoot = resolve(options.releaseRoot ?? join(appDir, ".local/release"));
+  const releaseRoot = target === "firefox" ? join(outputRoot, "firefox") : outputRoot;
   const destination = join(releaseRoot, version);
   try {
     await stat(destination);
@@ -66,10 +84,10 @@ export async function packageExtension(options: { releaseRoot?: string } = {}): 
   const staging = await mkdtemp(join(releaseRoot, `.${version}-`));
   try {
     const extensionDir = join(staging, "extension");
-    await buildExtension({ outdir: extensionDir });
-    const files = await validateReleaseExtension(extensionDir, version);
+    await buildExtension({ target, outdir: extensionDir });
+    const files = await validateReleaseExtension(extensionDir, version, target);
     if (await readProjectVersion(appDir) !== version) throw new Error("Project version changed during packaging; retry with consistent metadata.");
-    const zipName = `threadlane-${version}.zip`;
+    const zipName = `threadlane-${target === "firefox" ? "firefox-" : ""}${version}.zip`;
     const zipPath = join(staging, zipName);
     const zipper = Bun.spawn(["zip", "-q", "-X", zipPath, ...files], { cwd: extensionDir, stdout: "pipe", stderr: "pipe" });
     const [status, stderr] = await Promise.all([zipper.exited, new Response(zipper.stderr).text()]);
@@ -77,7 +95,7 @@ export async function packageExtension(options: { releaseRoot?: string } = {}): 
     const sha256 = createHash("sha256").update(await readFile(zipPath)).digest("hex");
     await writeFile(join(staging, `${zipName}.sha256`), `${sha256}  ${zipName}\n`);
     await rename(staging, destination);
-    return { version, extensionDir: join(destination, "extension"), zipPath: join(destination, zipName), sha256 };
+    return { target, version, extensionDir: join(destination, "extension"), zipPath: join(destination, zipName), sha256 };
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
@@ -85,10 +103,9 @@ export async function packageExtension(options: { releaseRoot?: string } = {}): 
 
 if (import.meta.main) {
   try {
-    const args = process.argv.slice(2);
-    if (args.length && (args.length !== 2 || args[0] !== "--outdir" || !args[1])) throw new Error("Usage: bun run package:release [--outdir <release-root>]");
-    const result = await packageExtension({ releaseRoot: args[1] });
-    console.log(`Release ${result.version}: ${result.zipPath}\nSHA-256: ${result.sha256}\nInstalled dist/ was not changed. Nothing was uploaded or published.`);
+    const args = parseBuildArguments(process.argv.slice(2));
+    const result = await packageExtension({ target: args.target, releaseRoot: args.outdir });
+    console.log(`${result.target} release ${result.version}: ${result.zipPath}\nSHA-256: ${result.sha256}\nInstalled build directories were not changed. Nothing was uploaded or published.`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

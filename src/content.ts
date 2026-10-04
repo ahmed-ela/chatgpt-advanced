@@ -3,6 +3,7 @@ import {
   getAssistantMessageElements, findAssistantMessageElement, getAssistantMessageId, getProviderName,
 } from "./chatgpt-dom";
 import { icon } from "./icons";
+import { getExtensionApi, type ExtensionRuntime } from "./browser-api";
 import { ANNOTATION_MESSAGE_TYPE, ANNOTATION_CHANGED_TYPE, getAnnotationKey } from "./annotation-store";
 
 type ComposerElement = HTMLTextAreaElement | HTMLElement;
@@ -255,18 +256,7 @@ function bootstrap(): void {
 function startDevHotReload(): void {
   if (!__PLANNOTATOR_DEV__ || !__PLANNOTATOR_DEV_ORIGIN__) return;
 
-  const runtime = (
-    globalThis as typeof globalThis & {
-      chrome?: {
-        runtime?: {
-          onMessage?: {
-            addListener?: (callback: (message: { type?: string; buildId?: string }, sender?: unknown, respond?: (reply: unknown) => void) => void) => void;
-          };
-          sendMessage?: (message: unknown) => Promise<unknown> | void;
-        };
-      };
-    }
-  ).chrome?.runtime;
+  const runtime = getExtensionApi()?.runtime;
 
   if (!runtime?.sendMessage) return;
   const sendMessage = runtime.sendMessage.bind(runtime);
@@ -301,7 +291,8 @@ function startDevHotReload(): void {
     }, delayMs);
   };
 
-  runtime.onMessage?.addListener?.((message, _sender, respond) => {
+  runtime.onMessage?.addListener?.((rawMessage, _sender, respond) => {
+    const message = rawMessage as { type?: string } | null;
     if (message?.type === "plannotator:dev-can-reload") {
       respond?.({ ok: true, safe: safeToReload() });
       return;
@@ -1267,7 +1258,9 @@ async function insertPrompt(ui: UiRefs): Promise<void> {
 function startConversationPersistence(ui: UiRefs): void {
   currentConversationKey = getConversationStorageKey();
   if (conversationPollTimer) return;
-  annotationRuntime()?.onMessage?.addListener(message => {
+  annotationRuntime()?.onMessage?.addListener(rawMessage => {
+    if (!rawMessage || typeof rawMessage !== "object") return;
+    const message = rawMessage as { type?: string; key?: string };
     const session = currentAnnotationSession();
     if (message.type === ANNOTATION_CHANGED_TYPE && message.key === session.key) void refreshAnnotationSession(session);
   });
@@ -1347,8 +1340,8 @@ async function flushPersistedConversationState(): Promise<void> {
   await flushAnnotationSession(currentAnnotationSession());
 }
 
-function annotationRuntime(): { sendMessage(message: unknown): Promise<unknown>; onMessage?: { addListener(listener: (message: { type?: string; key?: string }) => void): void } } | undefined {
-  return (globalThis as unknown as { chrome?: { runtime?: ReturnType<typeof annotationRuntime> } }).chrome?.runtime;
+function annotationRuntime(): ExtensionRuntime | undefined {
+  return getExtensionApi()?.runtime;
 }
 
 function currentAnnotationSession(): AnnotationSession {

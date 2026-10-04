@@ -4,6 +4,28 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-04
+
+### Fixed
+
+- Bring Chrome 0.2.5's native send recovery fixes into the Firefox candidate: permit one matching asynchronous replay from a model extension without duplicating queued messages.
+- Revoke replay permission after draft edits, navigation, hidden tabs, or timeouts, preserving uncertain sends for explicit review.
+- Reopen unexpectedly closed IndexedDB connections only before a transaction begins, without replaying an uncertain write.
+- Preserve the Firefox browser API adapter and the existing durable retry behavior for retained composer drafts.
+
+## [0.3.0] - 2026-10-04
+
+### Added
+
+- Add a Firefox desktop build for Firefox 140 and later, with a nonpersistent background page, stable extension identity, and install-time disclosure of provider-bound messages and annotation excerpts.
+- Produce isolated Firefox build outputs and immutable Firefox release archives while preserving the Chrome build and release defaults.
+- Validate browser-specific manifests and pin Mozilla's web-ext tooling for reproducible Firefox linting.
+
+### Fixed
+
+- Retry a send-unconfirmed message using its original saved queue item, clearing only its unchanged matching draft after the retry is durably saved.
+- Preserve queue pause state, unrelated drafts, attachments, and edits made while retrying; avoid duplicate queued copies after a failed clear or lost retry response.
+
 ## [0.2.5] - 2026-10-04
 
 ### Fixed

@@ -1,5 +1,6 @@
 import { getQueueKey, QUEUE_CHANGED_TYPE, QUEUE_MESSAGE_TYPE, QueueStore, type QueueRequest, type QueueResponse } from "./queue-store";
 import { ANNOTATION_CHANGED_TYPE, ANNOTATION_MESSAGE_TYPE, AnnotationStore, getAnnotationKey, type AnnotationRequest, type AnnotationResponse } from "./annotation-store";
+import { getExtensionApi } from "./browser-api";
 
 declare const __PLANNOTATOR_DEV__: boolean;
 interface QueueSender { tab?: { id?: number; url?: string }; url?: string; frameId?: number }
@@ -9,7 +10,7 @@ export interface QueueChrome {
   };
   tabs?: { sendMessage(tabId: number, message: unknown, options?: { frameId: number }): Promise<unknown> };
 }
-const chromeApi = (globalThis as typeof globalThis & { chrome?: QueueChrome }).chrome;
+const extensionApi = getExtensionApi();
 
 /** Register separately so protocol validation and durable responses can be tested. */
 export function registerAnnotationWorker(api: QueueChrome, annotationStore = new AnnotationStore()): void {
@@ -44,11 +45,11 @@ export function registerAnnotationWorker(api: QueueChrome, annotationStore = new
   });
 }
 
-if (chromeApi?.runtime) {
+if (extensionApi?.runtime.onMessage) {
 const store = new QueueStore();
 const seenTabs = new Map<number, string>();
 
-chromeApi?.runtime?.onMessage.addListener((message, sender, respond) => {
+extensionApi.runtime.onMessage.addListener((message, sender, respond) => {
   if (!message || typeof message !== "object" || (message as { type?: string }).type !== QUEUE_MESSAGE_TYPE) return;
   const request = message as QueueRequest;
   const tabId = sender.tab?.id;
@@ -65,7 +66,7 @@ chromeApi?.runtime?.onMessage.addListener((message, sender, respond) => {
     if (result.changed && request.action !== "edit-heartbeat" && (request.action !== "heartbeat" || request.busy === false)) {
       for (const [knownTab, knownKey] of seenTabs) {
         if (knownKey !== request.key) continue;
-        void chromeApi?.tabs?.sendMessage(knownTab, {
+        void extensionApi.tabs?.sendMessage(knownTab, {
           type: QUEUE_CHANGED_TYPE, key: request.key, revision: result.state.revision,
         }).catch(() => { seenTabs.delete(knownTab); });
       }
@@ -75,7 +76,7 @@ chromeApi?.runtime?.onMessage.addListener((message, sender, respond) => {
   });
   return true;
 });
-registerAnnotationWorker(chromeApi);
+registerAnnotationWorker({ runtime: { onMessage: extensionApi.runtime.onMessage }, tabs: extensionApi.tabs });
 }
 
 // Keep development auto-reload and the durable queue in one MV3 worker.

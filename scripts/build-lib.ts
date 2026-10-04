@@ -7,13 +7,23 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
 
 export const appDir = resolve(scriptsDir, "..");
 export const distDir = resolve(appDir, "dist");
+export const firefoxDistDir = resolve(appDir, "dist-firefox");
 export const defaultDevPort = Number(process.env.PLANNOTATOR_EXTENSION_DEV_PORT ?? "19445");
+export type BrowserTarget = "chrome" | "firefox";
+export const firefoxExtensionId = "threadlane@extensions.invalid";
+// Firefox 140 introduced built-in install consent for these data categories.
+// Queued prompts and annotation excerpts are sent to the user's AI provider;
+// local-only storage and the absence of telemetry do not make this "none".
+// https://extensionworkshop.com/documentation/develop/firefox-builtin-data-consent/
+export const firefoxMinimumVersion = "140.0";
+export const firefoxDataPermissions = ["personalCommunications", "websiteContent"];
 
 export const providerMatches = ["https://chatgpt.com/*", "https://claude.ai/*", "https://gemini.google.com/*"];
 export const fixtureMatches = ["http://127.0.0.1/*", "http://localhost/*"];
 export const iconSizes = [16, 32, 48, 128];
 
-interface BuildExtensionOptions {
+export interface BuildExtensionOptions {
+  target?: BrowserTarget;
   dev?: boolean;
   buildId?: string;
   devOrigin?: string;
@@ -21,8 +31,9 @@ interface BuildExtensionOptions {
 }
 
 export async function buildExtension(options: BuildExtensionOptions = {}): Promise<void> {
+  const target = browserTarget(options.target);
   const dev = options.dev ?? false;
-  const outputDir = resolve(options.outdir ?? distDir);
+  const outputDir = resolve(options.outdir ?? defaultOutputDirectory(target));
   const buildId = options.buildId ?? (dev ? createBuildId() : "prod");
   const devOrigin = normalizeDevOrigin(options.devOrigin ?? `http://127.0.0.1:${defaultDevPort}`);
   // Read fresh for every rebuild. Refuse inconsistent release metadata before
@@ -75,7 +86,26 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
     throw new Error("Browser extension build failed");
   }
 
-  manifest.background = { service_worker: "queue-worker.js", type: "module" };
+  if (target === "firefox") {
+    // MV3 event pages are nonpersistent implicitly; Firefox rejects the
+    // legacy persistent property even when its value is false.
+    manifest.background = { scripts: ["queue-worker.js"] };
+    // Omitting gecko_android keeps distribution desktop-only. web-ext #3561
+    // can still warn about Android 142 consent support; do not opt into an
+    // untested mobile platform just to suppress that warning.
+    manifest.browser_specific_settings = {
+      gecko: {
+        id: firefoxExtensionId,
+        strict_min_version: firefoxMinimumVersion,
+        data_collection_permissions: { required: [...firefoxDataPermissions] },
+      },
+    };
+    // Durable saved notes/queues must not include private browsing sessions.
+    manifest.incognito = "not_allowed";
+  } else {
+    manifest.background = { service_worker: "queue-worker.js", type: "module" };
+    delete manifest.browser_specific_settings;
+  }
   delete manifest.permissions;
   if (dev) {
     // Only the worker contacts the local build server. Reloading needs no
@@ -91,6 +121,33 @@ export async function buildExtension(options: BuildExtensionOptions = {}): Promi
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(resolve(appDir, asset.source), destination);
   }
+}
+
+export function browserTarget(value: unknown = "chrome"): BrowserTarget {
+  if (value !== "chrome" && value !== "firefox") throw new Error("Choose --target chrome or --target firefox.");
+  return value;
+}
+
+export function defaultOutputDirectory(target: BrowserTarget = "chrome"): string {
+  return browserTarget(target) === "firefox" ? firefoxDistDir : distDir;
+}
+
+/** Shared CLI flags; reject duplicates and missing values before any build writes. */
+export function parseBuildArguments(args: string[]): { target: BrowserTarget; outdir?: string } {
+  let target: BrowserTarget = "chrome";
+  let outdir: string | undefined;
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index]!;
+    const value = args[index + 1];
+    if (!["--target", "--outdir"].includes(flag) || seen.has(flag) || !value || value.startsWith("--")) {
+      throw new Error("Use [--target chrome|firefox] [--outdir <directory>], once per option.");
+    }
+    seen.add(flag);
+    if (flag === "--target") target = browserTarget(value);
+    else outdir = value;
+  }
+  return { target, ...(outdir ? { outdir } : {}) };
 }
 
 export function createBuildId(): string {
