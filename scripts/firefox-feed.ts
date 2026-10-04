@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { appDir, firefoxExtensionId, firefoxMinimumVersion, firefoxUpdateUrl } from "./build-lib";
 import { validateReleaseExtension } from "./package";
 import { parseVersion, readProjectVersion } from "./version";
@@ -17,6 +18,24 @@ export interface FirefoxUpdate {
   applications: { gecko: { strict_min_version: string } };
 }
 export interface FirefoxFeed { addons: Record<string, { updates: FirefoxUpdate[] }> }
+
+/** Trusted local operator evidence, not a machine-verified signature proof. */
+export interface MozillaBrowserReceipt {
+  schemaVersion: 1;
+  kind: "mozilla-browser-native-download";
+  mozillaDownloadUrl: string;
+  download: { basename: string; completedAt: string; sha256: string; size: number };
+  firefoxVerification: {
+    method: "normal-signed-install";
+    addonId: string;
+    version: string;
+    xpiSha256: string;
+    signaturesRequired: true;
+    completedAt: string;
+    evidencePath: string;
+    evidenceSha256: string;
+  };
+}
 
 export function emptyFirefoxFeed(): FirefoxFeed {
   return { addons: { [firefoxExtensionId]: { updates: [] } } };
@@ -160,14 +179,79 @@ async function xpiFile(path: string, name: string): Promise<Buffer> {
   } catch (error) { child.kill(); throw error; }
 }
 
+function exactKeys(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).sort().join() === [...keys].sort().join();
+}
+
+function recordedTime(value: unknown): number {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) {
+    throw new Error("Browser receipt timestamps must be UTC ISO timestamps.");
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value.replace(/Z$/, value.includes(".") ? "Z" : ".000Z")) {
+    throw new Error("Browser receipt contains an invalid timestamp.");
+  }
+  return timestamp;
+}
+
+async function verifyBrowserReceipt(receiptPath: string, options: {
+  xpiPath: string; bytes: Buffer; mozillaDownloadUrl: string; version: string;
+}): Promise<void> {
+  if ((await stat(receiptPath)).size > 64 * 1024) throw new Error("Browser receipt exceeds the size limit.");
+  const receiptBytes = await readFile(receiptPath);
+  if (receiptBytes.byteLength > 64 * 1024) throw new Error("Browser receipt exceeds the size limit.");
+  const receipt: unknown = JSON.parse(receiptBytes.toString("utf8"));
+  if (!exactKeys(receipt, ["schemaVersion", "kind", "mozillaDownloadUrl", "download", "firefoxVerification"]) ||
+      receipt.schemaVersion !== 1 || receipt.kind !== "mozilla-browser-native-download" ||
+      typeof receipt.mozillaDownloadUrl !== "string" ||
+      !exactKeys(receipt.download, ["basename", "completedAt", "sha256", "size"]) ||
+      !exactKeys(receipt.firefoxVerification, ["method", "addonId", "version", "xpiSha256", "signaturesRequired", "completedAt", "evidencePath", "evidenceSha256"])) {
+    throw new Error("Invalid browser-download receipt schema.");
+  }
+  const source = mozillaUrl(receipt.mozillaDownloadUrl, true);
+  if (source.search || source.href !== mozillaUrl(options.mozillaDownloadUrl, true).href) {
+    throw new Error("Browser receipt must record the same official Mozilla URL without query credentials.");
+  }
+  const downloaded = receipt.download, verified = receipt.firefoxVerification;
+  const hash = createHash("sha256").update(options.bytes).digest("hex");
+  if (downloaded.basename !== basename(options.xpiPath) || downloaded.sha256 !== hash || downloaded.size !== options.bytes.byteLength) {
+    throw new Error("Browser receipt does not match this downloaded XPI's basename, size, or SHA-256.");
+  }
+  if (verified.method !== "normal-signed-install" || verified.signaturesRequired !== true ||
+      verified.addonId !== firefoxExtensionId || verified.version !== options.version || verified.xpiSha256 !== hash) {
+    throw new Error("Browser receipt lacks normal Firefox signature-acceptance evidence for this exact add-on and XPI.");
+  }
+  if (recordedTime(verified.completedAt) < recordedTime(downloaded.completedAt)) {
+    throw new Error("Firefox verification cannot precede the recorded browser download.");
+  }
+  if (typeof verified.evidencePath !== "string" || !isAbsolute(verified.evidencePath) ||
+      resolve(verified.evidencePath) === options.xpiPath ||
+      typeof verified.evidenceSha256 !== "string" || !/^[0-9a-f]{64}$/.test(verified.evidenceSha256)) {
+    throw new Error("Browser receipt requires an absolute Firefox verification evidence path and SHA-256.");
+  }
+  const evidenceStat = await stat(verified.evidencePath);
+  if (!evidenceStat.isFile() || evidenceStat.size === 0 || evidenceStat.size > MAX_XPI_BYTES) {
+    throw new Error("Firefox verification evidence must be a nonempty file within the size limit.");
+  }
+  const evidence = await readFile(verified.evidencePath);
+  if (!evidence.byteLength || evidence.byteLength > MAX_XPI_BYTES ||
+      createHash("sha256").update(evidence).digest("hex") !== verified.evidenceSha256) {
+    throw new Error("Firefox verification evidence does not match the browser receipt's SHA-256.");
+  }
+}
+
 /**
- * This checks Mozilla download provenance and exact bytes, not PKCS7/COSE
- * cryptography. Firefox still performs signature verification at installation.
- * Signature filenames alone are never accepted as provenance.
+ * Checks anonymous Mozilla provenance, or explicitly selected trusted local
+ * operator evidence of a browser download and normal signed Firefox install.
+ * Neither mode implements PKCS7/COSE cryptography. Receipt authenticity and
+ * evidence interpretation remain the operator's responsibility; hashes bind
+ * those records to these bytes. HTTP failures never switch to receipt mode.
  */
 export async function createFirefoxUpdateFeed(options: {
   signedXpi: string;
   mozillaDownloadUrl: string;
+  mozillaBrowserReceipt?: string;
   updateLink: string;
   expectedDirectory: string;
   version: string;
@@ -199,10 +283,20 @@ export async function createFirefoxUpdateFeed(options: {
     const manifest = JSON.parse((await xpiFile(snapshot, "manifest.json")).toString("utf8"));
     if (manifest.version !== options.version || manifest.browser_specific_settings?.gecko?.id !== firefoxExtensionId || manifest.browser_specific_settings?.gecko?.update_url !== firefoxUpdateUrl) throw new Error("Signed XPI identity, version, or update feed does not match this release.");
     for (const name of expectedFiles) {
-      if (!(await xpiFile(snapshot, name)).equals(await readFile(join(options.expectedDirectory, name)))) throw new Error(`Signed XPI payload differs from the tested release: ${name}.`);
+      const signed = await xpiFile(snapshot, name), expected = await readFile(join(options.expectedDirectory, name));
+      // Mozilla can serialize manifest JSON without the candidate's final LF.
+      // Compare every field and value, accepting only JSON serialization changes.
+      const matches = name === "manifest.json"
+        ? isDeepStrictEqual(manifest, JSON.parse(expected.toString("utf8")))
+        : signed.equals(expected);
+      if (!matches) throw new Error(`Signed XPI payload differs from the tested release: ${name}.`);
     }
-    const fromMozilla = await mozillaDownload(options.mozillaDownloadUrl, options.download ?? fetch);
-    if (!bytes.equals(fromMozilla)) throw new Error("Local XPI does not match the trusted Mozilla download. The feed was not changed.");
+    if (options.mozillaBrowserReceipt !== undefined) {
+      await verifyBrowserReceipt(resolve(options.mozillaBrowserReceipt), { xpiPath: path, bytes, mozillaDownloadUrl: options.mozillaDownloadUrl, version: options.version });
+    } else {
+      const fromMozilla = await mozillaDownload(options.mozillaDownloadUrl, options.download ?? fetch);
+      if (!bytes.equals(fromMozilla)) throw new Error("Local XPI does not match the trusted Mozilla download. The feed was not changed.");
+    }
     const hostedBytes = await publicAssetDownload(link, options.download ?? fetch);
     if (!bytes.equals(hostedBytes)) throw new Error("Public XPI does not match the verified Mozilla-signed bytes. The feed was not changed.");
     const update: FirefoxUpdate = { version: options.version, update_link: link,
@@ -230,7 +324,7 @@ if (import.meta.main) {
     for (let index = 0; index < args.length; index++) {
       const flag = args[index]!;
       if (flag === "--empty" && !empty) { empty = true; continue; }
-      if (!["--out", "--signed-xpi", "--mozilla-download-url", "--update-link", "--expected-dir"].includes(flag) || flags.has(flag) || !args[index + 1] || args[index + 1]!.startsWith("--")) throw new Error("Use --empty --out <updates.json>, or --signed-xpi <file.xpi> --mozilla-download-url <url> --update-link <url> --out <updates.json> [--expected-dir <candidate/extension>].");
+      if (!["--out", "--signed-xpi", "--mozilla-download-url", "--mozilla-browser-receipt", "--update-link", "--expected-dir"].includes(flag) || flags.has(flag) || !args[index + 1] || args[index + 1]!.startsWith("--")) throw new Error("Use --empty --out <updates.json>, or --signed-xpi <file.xpi> --mozilla-download-url <url> --update-link <url> --out <updates.json> [--expected-dir <candidate/extension>] [--mozilla-browser-receipt <receipt.json>].");
       flags.set(flag, args[++index]!);
     }
     if (!flags.has("--out")) throw new Error("An explicit --out path is required; nothing is uploaded by this script.");
@@ -246,7 +340,9 @@ if (import.meta.main) {
       const version = await readProjectVersion(appDir);
       for (const key of ["--signed-xpi", "--mozilla-download-url", "--update-link"]) if (!flags.has(key)) throw new Error(`Missing ${key}; unsigned builds cannot become updates.`);
       feed = await createFirefoxUpdateFeed({ signedXpi: flags.get("--signed-xpi")!, mozillaDownloadUrl: flags.get("--mozilla-download-url")!, updateLink: flags.get("--update-link")!,
+        mozillaBrowserReceipt: flags.get("--mozilla-browser-receipt"),
         expectedDirectory: resolve(flags.get("--expected-dir") ?? join(appDir, ".local/release/firefox", version, "extension")), version, previous });
+      if (flags.has("--mozilla-browser-receipt")) console.log("Provenance: explicit trusted local browser-download and Firefox-install receipt; this tool does not cryptographically verify signatures or authenticate operator evidence.");
     }
     await writeFirefoxFeed(output, feed);
     console.log(`Wrote ${feed.addons[firefoxExtensionId]!.updates.length} Firefox update entries to ${output}. Nothing was uploaded or published.`);

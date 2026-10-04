@@ -4,6 +4,12 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-04
+
+### Changed
+
+- Qualify delivery of Mozilla-signed Firefox updates from 0.3.2 to 0.3.3 through the public HTTPS update feed. This release changes the version only; extension runtime behavior and permissions are unchanged.
+
 ## [0.3.2] - 2026-10-04
 
 ### Added
