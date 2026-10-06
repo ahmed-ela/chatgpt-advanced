@@ -4,6 +4,80 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-10-06
+
+### Fixed
+
+- Preserve verified ChatGPT conversation identity through cached-chat navigation, and ignore hidden cached answers when observing the first send in a new chat.
+- Capture form-submit first sends and distinguish an unverified conversation identity from an unfinished response in queue recovery guidance.
+
+## [0.3.6] - 2026-10-05
+
+### Fixed
+
+- Keep stale animation in a positively completed ChatGPT turn from blocking queued follow-ups, while retaining active response and conversation identity checks.
+- Explain draft, attachment, and unconfirmed completion holds in the queue, and expose content-free dispatch diagnostics for intermittent stalls.
+- Prevent development reloads from rebuilding the wrong checkout; support a qualified source checkout writing to an existing installed extension directory.
+
+Includes the 0.3.4 background dispatch changes for Chrome and the Firefox candidate. Live verification and release status are recorded separately; this entry does not imply store submission or publication.
+
+## [0.3.5] - 2026-10-05
+
+### Changed
+
+- Reserve version 0.3.5 for the public Mozilla submission, which retains the tested 0.3.2 runtime and omits the self-distributed update feed. It does not include the 0.3.4 background dispatch changes.
+
+## [0.3.4] - 2026-10-04
+
+### Fixed
+
+- Remove the visible-tab requirement for queued follow-ups while retaining completion, draft, pause, ownership, and uncertain-send checks. Live Chrome background sending passed on ChatGPT and Claude; Gemini can still wait for its native response animation to finish when the tab becomes visible.
+- Deliver controlled-editor changes through `beforeinput` before falling back to direct DOM edits, preserving editor cancellation and avoiding duplicate insertion.
+- Wake queue checks directly from completion events and yield native composer commits without background-throttled timers.
+- Reject expired send authorizations after a suspended tab resumes instead of clicking Send with stale ownership.
+
+Firefox 0.3.4 live background verification remains pending because computer use could not complete the temporary-add-on file picker. This candidate has not been submitted to Chrome or published through the Firefox update feed; see [verification status](store/BACKGROUND_QUEUE_VERIFICATION.md).
+
+## [0.3.3] - 2026-10-04
+
+### Changed
+
+- Prepare a version-only candidate for qualifying Mozilla-signed Firefox updates from 0.3.2 to 0.3.3 through the public HTTPS update feed. Extension runtime behavior and permissions are unchanged. Signing is complete, but the normal version-upgrade and state-retention test remains pending; the live feed still advertises 0.3.2.
+
+## [0.3.2] - 2026-10-04
+
+### Added
+
+- Add an explicitly named Threadlane BETA Chrome build and isolated package output for a separate unlisted store listing.
+- Configure the existing Firefox add-on identity for a stable HTTPS update feed used by Mozilla-signed, self-distributed releases.
+- Generate Firefox update metadata only after the local XPI matches both a trusted Mozilla download and the public GitHub release asset, with matching identity/version/feed checks and a pinned SHA-256 hash; support an empty feed while signing is pending.
+
+### Changed
+
+- Keep the public Chrome build target and its committed 0.2.5 submission artifacts separate from beta packages.
+
+## [0.3.1] - 2026-10-04
+
+### Fixed
+
+- Bring Chrome 0.2.5's native send recovery fixes into the Firefox candidate: permit one matching asynchronous replay from a model extension without duplicating queued messages.
+- Revoke replay permission after draft edits, navigation, hidden tabs, or timeouts, preserving uncertain sends for explicit review.
+- Reopen unexpectedly closed IndexedDB connections only before a transaction begins, without replaying an uncertain write.
+- Preserve the Firefox browser API adapter and the existing durable retry behavior for retained composer drafts.
+
+## [0.3.0] - 2026-10-04
+
+### Added
+
+- Add a Firefox desktop build for Firefox 140 and later, with a nonpersistent background page, stable extension identity, and install-time disclosure of provider-bound messages and annotation excerpts.
+- Produce isolated Firefox build outputs and immutable Firefox release archives while preserving the Chrome build and release defaults.
+- Validate browser-specific manifests and pin Mozilla's web-ext tooling for reproducible Firefox linting.
+
+### Fixed
+
+- Retry a send-unconfirmed message using its original saved queue item, clearing only its unchanged matching draft after the retry is durably saved.
+- Preserve queue pause state, unrelated drafts, attachments, and edits made while retrying; avoid duplicate queued copies after a failed clear or lost retry response.
+
 ## [0.2.5] - 2026-10-04
 
 ### Fixed

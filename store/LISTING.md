@@ -1,6 +1,6 @@
 # Store listing draft
 
-Status: Threadlane public submission is authorized. This listing draft is prepared for the confirmed Threadlane account; publisher registration/payment, screenshots, and the release gates still need completion. The dashboard is accessible; registration is currently at the Developer Agreement and one-time $5 fee step. Nothing has been uploaded, submitted for review, or published.
+Status: Threadlane 0.3.6 replaced the pending public Chrome 0.2.5 submission on 2026-10-05. The dashboard confirmed **Pending review**, Public distribution, and automatic publication after approval; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). The description below was saved with that submission. Approval and public availability have not been verified.
 
 ## Name
 
@@ -22,13 +22,13 @@ Threadlane works inside ChatGPT, Claude, and Gemini:
 - Drag to reorder, edit a message in its original queue slot, remove it, pause/resume the queue, or use Send now to interrupt the current response and send a selected message.
 - Keep saved notes and queues across tabs, page reloads, and browser restarts in the same Chrome profile.
 
-Your notes and queue are stored locally in the extension, without publisher analytics or cloud storage. Queued messages are submitted to the AI provider through its normal composer. They are not synced between devices or Chrome profiles. A visible tab for the conversation must be open for automatic sending; existing drafts and attachments block automatic delivery in that tab. The queue supports text messages, not attachments.
+Your notes and queue are stored locally in the extension, without publisher analytics or cloud storage. Queued messages are submitted to the AI provider through its normal composer. They are not synced between devices or Chrome profiles. A tab for the conversation must remain open and able to run for automatic sending; existing drafts and attachments block automatic delivery in that tab. ChatGPT and Claude can continue sending in a background tab. Gemini may wait until you return to the tab so its response animation can finish. Closed, frozen, or discarded tabs and a sleeping computer cannot send. The queue supports text messages, not attachments.
 
 This is an early beta. If the extension cannot confirm a send, it holds the queue for your review. Check the conversation before retrying. Changes to the providers' websites may affect compatibility. You need access to the relevant provider and its normal chat interface; the extension does not include an AI subscription.
 
 Threadlane is an independent extension and is not affiliated with or endorsed by OpenAI, Anthropic, or Google.
 
-## Publisher fields to finish
+## Publisher fields to verify before updating
 
 - Category: choose the dashboard's appropriate productivity category.
 - Language: English.

@@ -2,6 +2,8 @@
 
 Unchecked items are release gates, not claims that checks have passed. Record the tested commit, version, ZIP hash, browser version, provider, date, and observed result when completing them. Public distribution is authorized and still requires store review. [Chrome distribution guidance](https://developer.chrome.com/docs/webstore/cws-dashboard-distribution/).
 
+Last recorded distribution state: public Chrome 0.3.6 replaced 0.2.5 on 2026-10-05 and is **Pending review**, with automatic publication after approval. Firefox public 0.3.5 remains Awaiting Review and its signed beta feed advertises 0.3.2. Chrome 0.3.6's retained-animation patch passed live hidden-tab sending on ChatGPT; the earlier background check passed on ChatGPT and Claude, while Gemini retained an unfinished native response animation when hidden. Firefox 0.3.6 live verification is pending because computer use could not complete the temporary-add-on file picker; neither Firefox channel was updated. Use [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md), [FIREFOX_SUBMISSION_STATUS.md](FIREFOX_SUBMISSION_STATUS.md), [AUTOSEND_PATCH_0.3.6.md](AUTOSEND_PATCH_0.3.6.md), and [BACKGROUND_QUEUE_VERIFICATION.md](BACKGROUND_QUEUE_VERIFICATION.md) for dated evidence. The unchecked gates below remain requirements for subsequent releases, rather than a claim that every gate was exercised in this submission.
+
 ## Local candidate
 
 - [ ] Review the complete diff and confirm the intended version/changelog. Run `bun run version:check`, `bunx tsc --noEmit`, and `bun test`.
@@ -32,7 +34,7 @@ Migration and isolation:
 
 ## Store draft and approval
 
-- [ ] Complete publisher registration for the confirmed threadlane.support@gmail.com account. Dashboard access works; the Developer Agreement and one-time $5 fee are still awaiting the user's action/confirmation. No agreement has been accepted and no payment made by this work. Verify any remaining account-security requirements in the dashboard.
+- [ ] Verify the confirmed threadlane.support@gmail.com publisher account and existing public item before updating it. Registration is complete and the last recorded 0.3.6 submission is pending review; check the current dashboard for any new account or security requirements.
 - [ ] Enter the already hosted and verified [privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf) in the dashboard, with threadlane.support@gmail.com as the support contact.
 - [ ] Review [LISTING.md](LISTING.md) and [PRIVACY_FIELDS.md](PRIVACY_FIELDS.md) against the actual dashboard and final ZIP. No placeholder may remain in a submitted field.
 - [ ] Add the 128px store icon, the supplied 440×280 small promotional tile, and actual screenshots showing annotations and the queue with sample text. Verify current dashboard dimensions and upload requirements before submission; keep source/promo files outside the extension ZIP.

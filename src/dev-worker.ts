@@ -1,3 +1,5 @@
+import { getExtensionApi } from "./browser-api";
+
 declare const __PLANNOTATOR_DEV_ORIGIN__: string;
 declare const __PLANNOTATOR_BUILD_ID__: string;
 
@@ -142,8 +144,10 @@ export async function allExtensionPagesSafe(tabs: DevReloadTabs, timeoutMs = 1_0
   } catch { return false; }
 }
 
-const chromeApi = (globalThis as typeof globalThis & { chrome?: { runtime?: DevReloadRuntime; tabs?: DevReloadTabs } }).chrome;
-if (chromeApi?.runtime) registerDevReload(chromeApi.runtime, {
+const extensionApi = getExtensionApi();
+if (extensionApi?.runtime.onMessage && extensionApi.runtime.reload) registerDevReload({
+  onMessage: extensionApi.runtime.onMessage, reload: extensionApi.runtime.reload,
+}, {
   origin: __PLANNOTATOR_DEV_ORIGIN__, workerBuildId: __PLANNOTATOR_BUILD_ID__,
-  canReload: () => chromeApi.tabs ? allExtensionPagesSafe(chromeApi.tabs) : Promise.resolve(false),
+  canReload: () => extensionApi.tabs ? allExtensionPagesSafe(extensionApi.tabs) : Promise.resolve(false),
 });

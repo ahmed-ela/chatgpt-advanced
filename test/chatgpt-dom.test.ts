@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getAssistantCompletionAfter, registerNewConversationAlias, clearConversationAlias } from "../src/chatgpt-dom";
+import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, registerNewConversationAlias, clearConversationAlias } from "../src/chatgpt-dom";
 
 let dom: Window;
 let document: Document;
@@ -115,6 +115,93 @@ describe("queue DOM adapter", () => {
     expect(writeComposer(composer, "")).toBe(true);
   });
 
+  test.each(["cancelled", "not cancelled"] as const)("a hidden controlled editor commits beforeinput once (%s)", handling => {
+    const composer = findQueueComposer()!;
+    composer.innerHTML = "<p>Existing draft</p>";
+    const paragraph = composer.firstElementChild!;
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    const text = "Queued <literal>\n    Keep indentation";
+    let editorState = "Existing draft";
+    let edits = 0;
+    let nativeEdits = 0;
+    let fallbackInputs = 0;
+    let observedEvent: InputEvent | undefined;
+    let observedRange: Range | undefined;
+    Object.defineProperty(document, "execCommand", { value: () => { nativeEdits++; return false; }, configurable: true });
+    composer.addEventListener("input", () => { fallbackInputs++; });
+    composer.addEventListener("beforeinput", raw => {
+      const event = raw as InputEvent;
+      observedEvent = event;
+      observedRange = dom.getSelection()!.getRangeAt(0).cloneRange() as unknown as Range;
+      // A controlled editor updates its model and renders its managed nodes.
+      // The adapter must not replace those nodes or replay this same edit.
+      if (handling === "cancelled") event.preventDefault();
+      editorState = event.data!;
+      paragraph.textContent = editorState;
+      edits++;
+    });
+    expect(writeComposer(composer, text)).toBe(true);
+    expect(observedRange?.startContainer).toBe(composer);
+    expect(observedRange?.startOffset).toBe(0);
+    expect(observedRange?.endContainer).toBe(composer);
+    expect(observedRange?.endOffset).toBe(1);
+    expect(observedEvent?.bubbles && observedEvent.composed && observedEvent.cancelable).toBe(true);
+    expect(observedEvent?.inputType).toBe("insertText");
+    expect(observedEvent?.data).toBe(text);
+    expect(editorState).toBe(text);
+    expect(readComposer(composer)).toBe(text);
+    expect(composer.firstElementChild).toBe(paragraph);
+    expect(composer.querySelector("literal")).toBeNull();
+    expect(edits).toBe(1);
+    expect(nativeEdits).toBe(0);
+    expect(fallbackInputs).toBe(0);
+  });
+
+  test("a controlled editor can reject replacement without losing its original draft", () => {
+    const composer = findQueueComposer()!;
+    composer.innerHTML = "<p>Keep the original draft</p>";
+    const paragraph = composer.firstElementChild;
+    let nativeEdits = 0;
+    let fallbackInputs = 0;
+    Object.defineProperty(document, "execCommand", { value: () => { nativeEdits++; return false; }, configurable: true });
+    composer.addEventListener("beforeinput", event => { event.preventDefault(); });
+    composer.addEventListener("input", () => { fallbackInputs++; });
+    expect(writeComposer(composer, "Rejected replacement")).toBe(false);
+    expect(readComposer(composer)).toBe("Keep the original draft");
+    expect(composer.firstElementChild).toBe(paragraph);
+    expect(nativeEdits).toBe(0);
+    expect(fallbackInputs).toBe(0);
+  });
+
+  test("a controlled editor receives selected deletion and preserves its empty managed paragraph", () => {
+    const composer = findQueueComposer()!;
+    composer.innerHTML = "<p>Saved to the queue</p>";
+    const paragraph = composer.firstElementChild!;
+    let editorState = "Saved to the queue";
+    let nativeEdits = 0;
+    let observedEvent: InputEvent | undefined;
+    let selectedText = "";
+    Object.defineProperty(document, "execCommand", { value: () => { nativeEdits++; return false; }, configurable: true });
+    composer.addEventListener("beforeinput", raw => {
+      const event = raw as InputEvent;
+      observedEvent = event;
+      selectedText = dom.getSelection()!.toString();
+      event.preventDefault();
+      editorState = "";
+      paragraph.replaceChildren(document.createElement("br"));
+    });
+    expect(writeComposer(composer, "")).toBe(true);
+    expect(observedEvent?.inputType).toBe("deleteContentBackward");
+    // HappyDOM normalizes the native event's null deletion data to "".
+    expect(observedEvent?.data || null).toBeNull();
+    expect(selectedText).toBe("Saved to the queue");
+    expect(editorState).toBe("");
+    expect(readComposer(composer).trim()).toBe("");
+    expect(composer.firstElementChild).toBe(paragraph);
+    expect(paragraph.firstElementChild?.tagName).toBe("BR");
+    expect(nativeEdits).toBe(0);
+  });
+
   test("recognizes attachment previews/removal controls but not upload picker", () => {
     const scope = document.querySelector("[data-composer-body]")!;
     scope.insertAdjacentHTML("beforeend", '<button aria-label="Add photos and files">+</button><input type="file">');
@@ -218,6 +305,105 @@ describe("queue DOM adapter", () => {
     expect(isChatBusy()).toBe(false);
   });
 
+  function completedTurnWithAnimatedThought(): void {
+    document.querySelector("[data-chatgpt-search-unit-key='two:assistant']")!.insertAdjacentHTML("afterbegin", '<div data-markdown-animated><p>Earlier thinking text.</p></div>');
+  }
+
+  test.each(["visible", "hidden"] as const)("a %s completed turn's earlier thinking animation does not hold the next send", visibility => {
+    Object.defineProperty(document, "visibilityState", { value: visibility, configurable: true });
+    completedTurnWithAnimatedThought();
+    expect(isChatBusy()).toBe(false);
+    expect(getAssistantCompletionAfter("user-1")).toBe(true);
+    // Completion proof is fresh, not a timeout or a cached finished state.
+    document.querySelector("[data-testid='copy-turn-action-button']")!.remove();
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test.each([
+    '<button aria-label="Stop">Stop</button>',
+    '<button data-testid="stop-button">Stop</button>',
+  ])("completed thinking animation never overrides an active generation control", control => {
+    completedTurnWithAnimatedThought();
+    document.querySelector("[data-composer-body]")!.insertAdjacentHTML("beforeend", control);
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test.each([
+    '<span role="status" aria-busy="true">ChatGPT is responding</span>',
+    '<div data-is-streaming="true">New response</div>',
+    '<div data-testid="conversation-loading">Loading conversation</div>',
+  ])("completed thinking animation never overrides native loading or streaming", activeState => {
+    completedTurnWithAnimatedThought();
+    document.querySelector("main")!.insertAdjacentHTML("beforeend", activeState);
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("a completed prior answer cannot authorize a newer uncommitted assistant body", () => {
+    const turn = document.querySelector("[data-chatgpt-search-unit-key='two:assistant']")!;
+    turn.insertAdjacentHTML("afterbegin", '<div data-markdown-text-style="assistant-message" data-markdown-animated><p>New answer is streaming.</p></div>');
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("an animated body after a completed answer still counts as a new response", () => {
+    const turn = document.querySelector("[data-chatgpt-search-unit-key='two:assistant']")!;
+    turn.insertAdjacentHTML("beforeend", '<div data-markdown-animated><p>New answer is streaming.</p></div>');
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("another turn's completion controls cannot release unrelated thinking animation", () => {
+    const main = document.querySelector("main")!;
+    main.innerHTML = `<div class="turn">${main.innerHTML}</div><div class="next-turn"><div data-markdown-animated><p>Uncommitted thinking.</p></div></div>`;
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("a newer user without a committed answer keeps the queue busy despite older thinking completion", () => {
+    completedTurnWithAnimatedThought();
+    document.querySelector("main")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="user" data-message-id="user-2">Next request.</div>');
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+    expect(getAssistantCompletionAfter("user-2")).toBe(false);
+  });
+
+  test("an older completed thinking animation remains harmless as later completed turns arrive", () => {
+    completedTurnWithAnimatedThought();
+    document.querySelector("main")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="user" data-message-id="user-2">Next request.</div><article data-message-author-role="assistant" data-message-id="assistant-2"><p>Next answer.</p><button data-testid="copy-turn-action-button">Copy</button></article>');
+    expect(isChatBusy()).toBe(false);
+    expect(getAssistantCompletionAfter("user-2")).toBe(true);
+    // It still needs its own toolbar, even when a newer turn is finished.
+    document.querySelector("[data-chatgpt-search-unit-key='two:assistant'] [data-testid='copy-turn-action-button']")!.remove();
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-2")).toBe(false);
+  });
+
+  test("a completion container spanning a different user cannot release retained animation", () => {
+    completedTurnWithAnimatedThought();
+    document.querySelector("[data-chatgpt-search-unit-key='two:assistant']")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="user" data-message-id="user-2">Next request.</div>');
+    document.querySelector("main")!.insertAdjacentHTML("beforeend", '<article data-message-author-role="assistant" data-message-id="assistant-2"><p>Next answer.</p><button data-testid="copy-turn-action-button">Copy</button></article>');
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-2")).toBe(false);
+  });
+
+  test("stale route identity cannot release a completed turn's animated thinking", () => {
+    completedTurnWithAnimatedThought();
+    dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("a code-block copy button alone cannot complete the animated turn", () => {
+    completedTurnWithAnimatedThought();
+    document.querySelector("[data-testid='copy-turn-action-button']")!.remove();
+    document.querySelector("[data-markdown-text-style='assistant-message']")!.insertAdjacentHTML("beforeend", '<pre><code>example</code><button aria-label="Copy">Copy</button></pre>');
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
   test("keeps the current initial response busy when typing replaces Stop with Send", () => {
     layout('<button type="button" aria-label="Stop">Stop</button>');
     const main = document.querySelector("main")!;
@@ -276,6 +462,114 @@ describe("queue DOM adapter", () => {
       marker.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc");
     }
   }
+
+  test.each(['aria-hidden="true"', 'style="visibility:hidden"', 'hidden', 'style="display:none"'])("empty new-chat capture ignores semantically hidden cached turns (%s)", attributes => {
+    dom.happyDOM.setURL("https://chatgpt.com/");
+    document.querySelector("main")!.innerHTML = `<section ${attributes} data-chatgpt-selection-conversation-id="${id}">
+      <div data-message-author-role="user">Cached question without a committed ID</div>
+      <div data-markdown-text-style="assistant-message">Cached assistant with nonempty layout rectangles</div>
+    </section>`;
+    expect(document.querySelector("section")!.getClientRects().length).toBeGreaterThan(0);
+    expect(isEmptyNewChat()).toBe(true);
+    document.querySelector("section")!.removeAttribute("aria-hidden");
+    document.querySelector("section")!.removeAttribute("hidden");
+    document.querySelector("section")!.removeAttribute("style");
+    expect(isEmptyNewChat()).toBe(false);
+  });
+
+  test("empty new-chat capture rejects a visible unidentified user, assistant or busy transcript", () => {
+    dom.happyDOM.setURL("https://chatgpt.com/");
+    const main = document.querySelector("main")!;
+    for (const markup of ['<div data-message-author-role="user">Uncommitted user</div>', '<div data-markdown-text-style="assistant-message">Uncommitted assistant</div>', '<span role="status" aria-busy="true">Responding</span>']) {
+      main.innerHTML = markup;
+      expect(isEmptyNewChat()).toBe(false);
+    }
+    main.replaceChildren();
+    expect(isEmptyNewChat()).toBe(true);
+  });
+
+  test("verified aliases survive a SPA round trip but cannot authorize a stale or changed transcript", () => {
+    const otherRoute = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const otherLocal = "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const firstUserId = "11111111-1111-4111-8111-111111111111";
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    clearConversationAlias(true);
+    dom.happyDOM.setURL(`https://chatgpt.com/c/${otherRoute}`);
+    expect(getCurrentConversationReadiness()).toBe("identity-unverified");
+    expect(registerNewConversationAlias(`chatgpt:${otherRoute}`, "First question.")).toBe(false);
+    for (const marker of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.setAttribute("data-chatgpt-selection-conversation-id", otherLocal);
+    document.querySelector(`[data-chatgpt-selection-message-id='${firstUserId}']`)!.setAttribute("data-chatgpt-selection-message-id", "22222222-2222-4222-8222-222222222222");
+    expect(registerNewConversationAlias(`chatgpt:${otherRoute}`, "First question.")).toBe(true);
+    clearConversationAlias(true);
+    dom.happyDOM.setURL(`https://chatgpt.com/c/${id}`);
+    expect(isCurrentConversationReady()).toBe(false);
+    expect(getAssistantCompletionAfter("22222222-2222-4222-8222-222222222222")).toBe(false);
+    layout(); localConversation();
+    expect(isCurrentConversationReady()).toBe(true);
+    expect(getAssistantCompletionAfter(firstUserId)).toBe(true);
+    const main = document.querySelector("main")!;
+    main.setAttribute("aria-busy", "true");
+    expect(getCurrentConversationReadiness()).toBe("loading");
+    expect(getAssistantCompletionAfter(firstUserId)).toBe(false);
+    main.removeAttribute("aria-busy");
+    const marker = document.querySelector("[data-chatgpt-selection-conversation-id]")!;
+    marker.setAttribute("data-chatgpt-selection-conversation-id", id);
+    expect(getCurrentConversationReadiness()).toBe("identity-unverified");
+    marker.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+    expect(isCurrentConversationReady()).toBe(false);
+    layout(); localConversation();
+    document.querySelector(`[data-chatgpt-selection-message-id='${firstUserId}']`)!.setAttribute("data-chatgpt-selection-message-id", "33333333-3333-4333-8333-333333333333");
+    expect(isCurrentConversationReady()).toBe(false);
+    layout(); localConversation();
+    document.querySelector("main")!.insertAdjacentHTML("afterbegin", '<div data-message-author-role="user" data-message-id="44444444-4444-4444-8444-444444444444">Different first user</div>');
+    expect(isCurrentConversationReady()).toBe(false);
+    clearConversationAlias(true);
+    dom.happyDOM.setURL(`https://chatgpt.com/c/${otherRoute}`);
+    layout();
+    for (const entry of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) entry.setAttribute("data-chatgpt-selection-conversation-id", otherLocal);
+    document.querySelector("[data-chatgpt-selection-message-id='user-1']")!.setAttribute("data-chatgpt-selection-message-id", "22222222-2222-4222-8222-222222222222");
+    expect(isCurrentConversationReady()).toBe(true);
+  });
+
+  test("identity-only alias registration never bypasses loading and document memory retains only 16 verified routes", () => {
+    localConversation();
+    document.querySelector("main")!.setAttribute("aria-busy", "true");
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    expect(isCurrentConversationReady()).toBe(false);
+    expect(getAssistantCompletionAfter("11111111-1111-4111-8111-111111111111")).toBe(false);
+    clearConversationAlias(true);
+    expect(isCurrentConversationReady()).toBe(false);
+    document.querySelector("main")!.removeAttribute("aria-busy");
+    expect(isCurrentConversationReady()).toBe(true);
+    for (let index = 1; index <= 16; index++) {
+      clearConversationAlias(true);
+      const suffix = index.toString(16).padStart(12, "0");
+      const route = `bbbbbbbb-bbbb-4bbb-8bbb-${suffix}`;
+      dom.happyDOM.setURL(`https://chatgpt.com/c/${route}`);
+      for (const marker of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.setAttribute("data-chatgpt-selection-conversation-id", `local-chatgpt:cccccccc-cccc-4ccc-8ccc-${suffix}`);
+      expect(registerNewConversationAlias(`chatgpt:${route}`, "First question.")).toBe(true);
+    }
+    clearConversationAlias(true);
+    dom.happyDOM.setURL(`https://chatgpt.com/c/${id}`);
+    layout(); localConversation();
+    expect(isCurrentConversationReady()).toBe(false);
+  });
+
+  test("verified aliases never carry into a replacement document with matching URL and transcript", async () => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    expect(isCurrentConversationReady()).toBe(true);
+    const previousDom = dom;
+    dom = new Window({ url: `https://chatgpt.com/c/${id}` });
+    document = dom.document as unknown as Document;
+    for (const name of globals) Object.defineProperty(globalThis, name, { value: name === "window" ? dom : name === "document" ? document : dom[name], configurable: true, writable: true });
+    Object.defineProperty(dom.HTMLElement.prototype, "getClientRects", { value: () => [new dom.DOMRect(0, 0, 100, 20)], configurable: true });
+    layout(); localConversation();
+    expect(isCurrentConversationReady()).toBe(false);
+    expect(getCurrentConversationReadiness()).toBe("identity-unverified");
+    await previousDom.happyDOM.close();
+  });
 
   test("new-chat local IDs require an explicit first-send binding and survive only their matching route", () => {
     localConversation();

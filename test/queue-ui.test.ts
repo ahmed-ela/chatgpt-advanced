@@ -68,7 +68,7 @@ async function waitFor(predicate: () => boolean, message = "condition", timeout 
   }
 }
 
-async function createTab(options: { newChat?: boolean; idle?: boolean; before?: Tab["before"]; returnBeforeRead?: boolean } = {}): Promise<Tab> {
+async function createTab(options: { newChat?: boolean; idle?: boolean; visibility?: DocumentVisibilityState; before?: Tab["before"]; returnBeforeRead?: boolean } = {}): Promise<Tab> {
   const dom = new Window({ url: options.newChat ? "https://chatgpt.com/" : "https://chatgpt.com/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
   const doc = dom.document as unknown as Document;
   doc.write(fixture);
@@ -78,9 +78,9 @@ async function createTab(options: { newChat?: boolean; idle?: boolean; before?: 
     doc.querySelector("#native-action")!.setAttribute("aria-label", "Send message");
   }
   if (options.idle) doc.querySelector("#native-action")!.setAttribute("aria-label", "Send message");
-  Object.assign(dom, { Array, Boolean, String, Number, Set, Map, WeakMap, Math, Date, Object, JSON, RegExp, Error, Promise, URL, atob });
+  Object.assign(dom, { Array, Boolean, String, Number, Set, Map, WeakMap, Math, Date, Object, JSON, RegExp, Error, Promise, URL, atob, MessageChannel });
   Object.defineProperty(dom, "top", { value: {}, configurable: true });
-  Object.defineProperty(doc, "visibilityState", { value: "visible", configurable: true });
+  Object.defineProperty(doc, "visibilityState", { value: options.visibility ?? "visible", configurable: true });
   Object.defineProperties(dom.HTMLElement.prototype, {
     getClientRects: { value: () => [new dom.DOMRect(100, 650, 700, 100)], configurable: true },
     getBoundingClientRect: { value: () => new dom.DOMRect(100, 650, 700, 100), configurable: true },
@@ -126,6 +126,10 @@ function enter(tab: Tab, options: { shiftKey?: boolean; isComposing?: boolean } 
 function busy(tab: Tab, value: boolean): void {
   tab.action.setAttribute("aria-label", value ? "Stop streaming" : "Send message");
   tab.action.textContent = value ? "Stop" : "Send";
+}
+function visibility(tab: Tab, state: DocumentVisibilityState): void {
+  Object.defineProperty(tab.doc, "visibilityState", { value: state, configurable: true });
+  tab.doc.dispatchEvent(new tab.dom.Event("visibilitychange") as unknown as Event);
 }
 function button(tab: Tab, action: string, id?: string): HTMLButtonElement {
   const selector = `${id ? `li[data-id='${id}'] ` : ""}button[data-action='${action}']`;
@@ -268,6 +272,50 @@ describe("Persistent message queue UI", () => {
     expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
     expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
     expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+  });
+
+  test.each(["click", "submit"] as const)("hiding a tab during a delayed native %s replay preserves exactly one send", async mode => {
+    const tab = await createTab();
+    const form = wrapComposerInForm(tab);
+    const text = "Finish the owned send after switching tabs";
+    const id = await enqueue(tab, text);
+    const gate = delayedSendInterceptor(tab);
+    const sent: string[] = [];
+    const acknowledge = () => {
+      sent.push(tab.composer.innerText);
+      postUserBubble(tab, text);
+      draft(tab, "");
+      busy(tab, true);
+    };
+    if (mode === "click") tab.action.addEventListener("click", acknowledge);
+    else form.addEventListener("submit", acknowledge);
+    busy(tab, false);
+    await waitFor(() => gate.canceled.length === 1, "initial send intercepted before hiding");
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueLastDispatchVisibility).toBe("visible");
+    expect(host.dataset.queueConfirmedSends).toBe("0");
+    visibility(tab, "hidden");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    const replay = () => {
+      if (mode === "click") gate.replay();
+      else {
+        const event = new tab.dom.SubmitEvent("submit", { bubbles: true, cancelable: true });
+        Object.defineProperties(event, { isTrusted: { value: true }, submitter: { value: tab.action } });
+        form.dispatchEvent(event as unknown as SubmitEvent);
+      }
+    };
+    replay();
+    replay();
+    await waitFor(() => !tab.queue.dispatching, "hidden native replay acknowledged");
+    visibility(tab, "visible");
+    replay();
+    await poll(tab);
+    expect(sent).toEqual([text]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "waiting"]]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(1);
+    expect(host.dataset.queueLastDispatchVisibility).toBe("hidden");
+    expect(host.dataset.queueConfirmedSends).toBe("1");
   });
 
   test.each(["native default", "direct delayed same submitter", "direct delayed null submitter"] as const)("a delayed replay permits one %s form submission", async mode => {
@@ -523,8 +571,10 @@ describe("Persistent message queue UI", () => {
     draft(tab, text);
     button(tab, "retry", id).click();
     await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status !== "review", "durable retry");
-    expect(tab.composer.innerText).toBe("");
     await waitFor(() => tab.queue.state?.items.find(item => item.id === id)?.status === "waiting", "retried send acknowledgement");
+    // Auto-dispatch may refill the cleared composer immediately after Retry.
+    // Its acknowledged send is the stable boundary for the final empty draft.
+    expect(tab.composer.innerText).toBe("");
     expect(native.sent).toEqual([text]);
     expect((await persisted()).items.map(item => item.id)).toEqual([id]);
     expect(tab.requests.filter(request => request.action === "retry")).toHaveLength(1);
@@ -689,11 +739,19 @@ describe("Persistent message queue UI", () => {
     expect(nativeSends).toBe(0);
   });
 
-  test.each(["Enter", "click"] as const)("observed first native %s permits queued dispatch after a new chat's temporary-ID response completes", async activation => {
+  test.each([
+    ["Enter", "", false], ["click", "", false], ["submit", "", false],
+    ["Enter", 'aria-hidden="true"', false], ["click", 'style="visibility:hidden"', false],
+    ["submit", 'aria-hidden="true"', false], ["submit", 'style="visibility:hidden"', false],
+    ["Enter", 'aria-hidden="true"', true],
+  ] as const)("observed first native %s permits queued dispatch despite cached hidden turns (%s, long response=%s)", async (activation, hiddenAttributes, longResponse) => {
     const tab = await createTab({ newChat: true });
     const firstUserId = "55555555-5555-4555-8555-555555555555";
     const queuedUserId = "66666666-6666-4666-8666-666666666666";
     const localId = "local-chatgpt:77777777-7777-4777-8777-777777777777";
+    if (hiddenAttributes) tab.doc.querySelector("main")!.insertAdjacentHTML("beforeend", `<section ${hiddenAttributes} data-chatgpt-selection-conversation-id="local-chatgpt:99999999-9999-4999-8999-999999999999">
+      <div data-markdown-text-style="assistant-message">Cached old reply with layout rectangles</div>
+    </section>`);
     let firstSends = 0;
     const nativeFirstSend = () => {
       firstSends++;
@@ -701,6 +759,7 @@ describe("Persistent message queue UI", () => {
       tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
       const main = tab.doc.querySelector("main")!;
       main.setAttribute("data-chatgpt-selection-conversation-id", localId);
+      if (longResponse) main.setAttribute("aria-busy", "true");
       main.innerHTML = `
         <article data-chatgpt-search-unit-key="${firstUserId}:user" data-chatgpt-search-message-ids="${firstUserId}">
           <div data-user-message-bubble="true"></div>
@@ -716,15 +775,27 @@ describe("Persistent message queue UI", () => {
     if (activation === "click") {
       tab.action.addEventListener("click", nativeFirstSend, { once: true });
       tab.action.click();
-    } else {
+    } else if (activation === "Enter") {
       tab.composer.addEventListener("keydown", nativeFirstSend, { once: true });
       enter(tab);
+    } else {
+      const form = tab.doc.createElement("form");
+      const scope = tab.doc.querySelector("[data-composer-body]")!;
+      scope.before(form); form.append(scope);
+      form.addEventListener("submit", nativeFirstSend, { once: true });
+      expect(form.dispatchEvent(new tab.dom.SubmitEvent("submit", { bubbles: true, cancelable: true }) as unknown as SubmitEvent)).toBe(true);
     }
     expect(firstSends).toBe(1);
     expect((await persisted()).items).toHaveLength(0);
     await poll(tab);
     await enqueue(tab, "Follow up after that first reply");
     expect((await persisted()).lastCompletedUserMessageId).toBe(firstUserId);
+    if (longResponse) {
+      now += 121000;
+      Object.defineProperty(tab.dom, "Date", { value: class extends Date { static now() { return now; } }, configurable: true });
+      await poll(tab);
+      expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("chat-busy");
+    }
     let queuedSends = 0;
     tab.action.addEventListener("click", () => {
       queuedSends++;
@@ -739,6 +810,7 @@ describe("Persistent message queue UI", () => {
     // Losing Stop alone must not authorize dispatch before the first reply's
     // committed message ID and completion controls arrive.
     busy(tab, false); now += 4000;
+    tab.doc.querySelector("main")!.removeAttribute("aria-busy");
     await poll(tab);
     expect(queuedSends).toBe(0);
     const answer = tab.doc.querySelector("#first-answer")!;
@@ -751,6 +823,86 @@ describe("Persistent message queue UI", () => {
     expect(saved.items[0]?.userMessageId).toBe(queuedUserId);
     expect(saved.items[0]?.text).toBe("Follow up after that first reply");
     expect(tab.doc.querySelector("main")!.getAttribute("data-chatgpt-selection-conversation-id")).toBe(localId);
+  });
+
+  test("a verified local conversation resumes after a SPA departure and return without inferring aliases for stale DOM", async () => {
+    const tab = await createTab({ newChat: true });
+    const firstUserId = "55555555-5555-4555-8555-555555555555";
+    const localId = "local-chatgpt:77777777-7777-4777-8777-777777777777";
+    draft(tab, "Witnessed first native send");
+    tab.action.addEventListener("click", () => {
+      tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+      const main = tab.doc.querySelector("main")!;
+      main.setAttribute("data-chatgpt-selection-conversation-id", localId);
+      main.innerHTML = `<article data-chatgpt-search-unit-key="${firstUserId}:user" data-chatgpt-search-message-ids="${firstUserId}"><div data-user-message-bubble="true">Witnessed first native send</div></article>
+        <article data-chatgpt-selection-message-id="88888888-8888-4888-8888-888888888888"><div data-markdown-text-style="assistant-message">Complete answer</div><button data-testid="copy-turn-action-button">Copy</button></article>`;
+      draft(tab, ""); busy(tab, true);
+    }, { once: true });
+    tab.action.click(); await poll(tab);
+    await enqueue(tab, "Queued before navigating away");
+    const main = tab.doc.querySelector("main")!;
+    const originalMarkup = main.innerHTML;
+    let sends = 0;
+    tab.action.addEventListener("click", () => {
+      sends++;
+      const user = tab.doc.createElement("article");
+      user.setAttribute("data-chatgpt-search-unit-key", "99999999-9999-4999-8999-999999999999:user");
+      user.setAttribute("data-chatgpt-search-message-ids", "99999999-9999-4999-8999-999999999999");
+      user.innerHTML = '<div data-user-message-bubble="true"></div>';
+      user.firstElementChild!.textContent = tab.composer.innerText;
+      main.append(user); draft(tab, ""); busy(tab, true);
+    });
+    // Navigating with stale old DOM cannot authorize a different queue route.
+    tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    await poll(tab);
+    busy(tab, false); await poll(tab);
+    expect(sends).toBe(0);
+    tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    main.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    await poll(tab);
+    expect(sends).toBe(0);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("identity-unverified");
+    main.setAttribute("data-chatgpt-selection-conversation-id", localId);
+    main.innerHTML = originalMarkup;
+    await poll(tab);
+    expect(sends).toBe(1);
+    expect((await persisted()).items[0]?.status).toBe("waiting");
+    expect(tab.shadow.querySelectorAll("li")).toHaveLength(0);
+    await enqueue(tab, "Queued behind the confirmed send");
+    draft(tab, "Keep this unsent draft");
+    main.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    busy(tab, false); await poll(tab);
+    expect(tab.composer.innerText).toBe("Keep this unsent draft");
+    expect(tab.shadow.textContent).not.toContain("Reload after the response finishes");
+    draft(tab, ""); await poll(tab);
+    expect(tab.shadow.textContent).toContain("Reload after the response finishes to reconnect the queue.");
+    expect(sends).toBe(1);
+  });
+
+  test("native submit from an unrelated form does not bind a new chat's local transcript", async () => {
+    const tab = await createTab({ newChat: true });
+    draft(tab, "Unsubmitted composer text");
+    const form = tab.doc.createElement("form");
+    tab.doc.body.append(form);
+    form.dispatchEvent(new tab.dom.SubmitEvent("submit", { bubbles: true, cancelable: true }) as unknown as SubmitEvent);
+    tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const localId = "local-chatgpt:77777777-7777-4777-8777-777777777777";
+    const main = tab.doc.querySelector("main")!;
+    main.setAttribute("data-chatgpt-selection-conversation-id", localId);
+    main.innerHTML = `<article data-chatgpt-search-unit-key="55555555-5555-4555-8555-555555555555:user" data-chatgpt-search-message-ids="55555555-5555-4555-8555-555555555555"><div data-user-message-bubble="true">Unsubmitted composer text</div></article>
+      <article data-chatgpt-selection-message-id="88888888-8888-4888-8888-888888888888"><div data-markdown-text-style="assistant-message">Already completed</div><button data-testid="copy-turn-action-button">Copy</button></article>`;
+    draft(tab, ""); busy(tab, true);
+    await poll(tab);
+    await enqueue(tab, "Keep this queued until identity is verified");
+    let sends = 0;
+    tab.action.addEventListener("click", () => sends++);
+    busy(tab, false);
+    await poll(tab);
+    expect(sends).toBe(0);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueState).toBe("identity-unverified");
+    expect(tab.shadow.textContent).toContain("Reload after the response finishes to reconnect the queue.");
+    expect(tab.shadow.textContent).not.toContain("confirm this response finished");
   });
 
   test("commits the message before clearing the composer and survives a fresh tab", async () => {
@@ -1134,6 +1286,127 @@ describe("Persistent message queue UI", () => {
     expect(right.shadow.querySelectorAll("li")).toHaveLength(1);
   });
 
+  test("visible and hidden tabs racing for the same queued item send it exactly once", async () => {
+    const visible = await createTab();
+    const hidden = await createTab({ visibility: "hidden" });
+    const id = await enqueue(visible, "Only one tab may send this shared item");
+    await waitFor(() => hidden.queue.state?.items.some(item => item.id === id) === true, "hidden tab receives shared item");
+    const visibleNative = simulateNativeChat(visible);
+    const hiddenNative = simulateNativeChat(hidden);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const contenders = new Set<Tab>();
+    for (const tab of [visible, hidden]) tab.before = async request => {
+      if (request.action === "claim") { contenders.add(tab); await gate; }
+    };
+    busy(visible, false);
+    busy(hidden, false);
+    await waitFor(() => contenders.size === 2, "both visible and hidden tabs attempt the same claim");
+    release();
+    await waitFor(() => visibleNative.sent.length + hiddenNative.sent.length === 1 &&
+      !visible.queue.dispatching && !hidden.queue.dispatching, "single shared dispatch acknowledged");
+    await poll(visible);
+    await poll(hidden);
+    expect([...visibleNative.sent, ...hiddenNative.sent]).toEqual(["Only one tab may send this shared item"]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "waiting"]]);
+    expect([...visible.requests, ...hidden.requests].filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+  });
+
+  test("switching to another tab while an owned claim returns preserves one send", async () => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Keep the claimed item when its tab becomes hidden");
+    const native = simulateNativeChat(tab);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let claimed = false;
+    tab.after = async request => {
+      if (request.action === "claim") { claimed = true; await gate; }
+    };
+    busy(tab, false);
+    await waitFor(() => claimed, "durable claim before its response");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("claimed");
+    visibility(tab, "hidden");
+    release();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "owned send acknowledged while hidden");
+    visibility(tab, "visible");
+    await poll(tab);
+    expect(native.sent).toEqual(["Keep the claimed item when its tab becomes hidden"]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "waiting"]]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "release")).toHaveLength(0);
+  });
+
+  test.each(["expired", "paused"] as const)("a hidden tab does not click after its delayed attempt response becomes %s", async change => {
+    const tab = await createTab({ visibility: "hidden" });
+    const text = "Preserve the saved item when send authorization changes";
+    const id = await enqueue(tab, text);
+    const native = simulateNativeChat(tab);
+    const clock = { now: Date.now() };
+    Object.assign(tab.dom, { Date: class extends Date { static override now() { return clock.now; } } });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempted = false;
+    tab.after = async request => {
+      if (request.action === "attempt") { attempted = true; await gate; }
+    };
+    busy(tab, false);
+    await waitFor(() => attempted, "durable attempt before its response");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    if (change === "expired") clock.now += 30_001;
+    else {
+      button(tab, "pause").click();
+      await waitFor(() => tab.queue.state?.paused === true, "pause persisted while attempt response is pending");
+    }
+    release();
+    await waitFor(() => !tab.queue.dispatching, "changed attempt preserved for review");
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerText).toBe("");
+    const saved = await persisted();
+    expect(saved.items.map(item => [item.id, item.status])).toEqual([[id, "review"]]);
+    expect(saved.items[0]?.text).toBe(text);
+    if (change === "paused") expect(saved.paused).toBe(true);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+  });
+
+  test.each(["draft", "attachment", "pause", "busy"] as const)("a hidden tab still respects its %s guard and sends after it clears", async guard => {
+    const tab = await createTab({ visibility: "hidden" });
+    const id = await enqueue(tab, "Send only after the protected state clears");
+    const native = simulateNativeChat(tab);
+    if (guard === "draft") draft(tab, "Unsent text must survive");
+    if (guard === "attachment") tab.composer.closest("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<div data-file-id="protected-file">File</div>');
+    if (guard === "pause") {
+      button(tab, "pause").click();
+      await waitFor(() => tab.queue.state?.paused === true, "hidden queue paused");
+    }
+    if (guard !== "busy") busy(tab, false);
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueState).toBe(guard === "pause" ? "paused" : guard === "busy" ? "chat-busy" : guard === "attachment" ? "attachments" : "draft");
+    expect(host.dataset.queueVisibility).toBe("hidden");
+    if (guard === "draft") {
+      expect(tab.composer.innerText).toBe("Unsent text must survive");
+      expect(tab.shadow.querySelector("li .status")?.textContent).toBe("Queue or clear your draft to continue.");
+      expect(Object.values(host.dataset).join(" ")).not.toContain("Unsent text must survive");
+      draft(tab, "");
+    } else if (guard === "attachment") {
+      expect(tab.shadow.querySelector("li .status")?.textContent).toBe("Send or remove your attachment to continue.");
+      tab.doc.querySelector("[data-file-id]")!.remove();
+    } else if (guard === "pause") button(tab, "pause").click();
+    else busy(tab, false);
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "hidden dispatch after its guard clears");
+    expect(native.sent).toEqual(["Send only after the protected state clears"]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    expect(tab.doc.visibilityState).toBe("hidden");
+    expect(host.dataset.queueLastDispatchVisibility).toBe("hidden");
+    expect(host.dataset.queueConfirmedSends).toBe("1");
+    expect(tab.shadow.querySelector("li .status")).toBeNull();
+    expect(tab.shadow.textContent).not.toContain("Stored in this Chrome profile");
+  });
+
   test("automatic dispatch waits when the composer contains an unsent draft", async () => {
     const tab = await createTab();
     await enqueue(tab, "Saved queued text");
@@ -1352,8 +1625,8 @@ describe("Persistent message queue UI", () => {
     expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
   });
 
-  test("completion mutations dispatch each next message promptly despite a fresh busy heartbeat", async () => {
-    const tab = await createTab();
+  test.each(["visible", "hidden"] as const)("completion mutations in a %s tab dispatch each next message despite a fresh busy heartbeat", async state => {
+    const tab = await createTab({ visibility: state });
     const initialAnswer = tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!;
     initialAnswer.querySelector(".turn-action-controls")!.remove();
     const native = simulateNativeChat(tab);
@@ -1363,6 +1636,14 @@ describe("Persistent message queue UI", () => {
     await poll(tab);
     expect(native.sent).toEqual([]);
     expect((await persisted()).items.every(item => item.status === "queued")).toBe(true);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueState).toBe("completion-pending");
+    expect(host.dataset.queueRouteReady).toBe("true");
+    expect(host.dataset.queueHasAnchor).toBe("true");
+    expect(host.dataset.queueVisibility).toBe(state);
+    expect(tab.shadow.querySelector("li .status")?.textContent).toBe("Waiting for ChatGPT to confirm this response finished.");
+    expect(tab.shadow.querySelectorAll("li .status")).toHaveLength(1);
+    expect(Object.values(host.dataset).join(" ")).not.toContain("First prompt after completion");
 
     busy(tab, true);
     await waitFor(() => !tab.queue.polling, "idle before refreshing busy heartbeat");
@@ -1389,5 +1670,32 @@ describe("Persistent message queue UI", () => {
     await waitFor(() => tab.queue.state?.items.length === 0, "final observed completion");
     expect(native.sent).toEqual(["First prompt after completion", "Second prompt after completion"]);
     expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([first, second]);
+    expect(host.dataset.queueLastDispatchVisibility).toBe(state);
+    expect(host.dataset.queueConfirmedSends).toBe("2");
+    expect(tab.shadow.querySelector(".status")).toBeNull();
+  });
+
+  test("a hidden native click is recorded as an attempt until its acknowledgement is durable", async () => {
+    const tab = await createTab({ visibility: "hidden" });
+    await enqueue(tab, "Confirm this hidden send through storage");
+    const native = simulateNativeChat(tab);
+    let releaseAck!: () => void;
+    const ackGate = new Promise<void>(resolve => { releaseAck = resolve; });
+    tab.before = request => request.action === "ack" ? ackGate : undefined;
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    busy(tab, false);
+    await waitFor(() => tab.requests.some(request => request.action === "ack"), "acknowledgement pending");
+    expect(native.sent).toHaveLength(1);
+    expect(host.dataset.queueLastDispatchVisibility).toBe("hidden");
+    expect(Number(host.dataset.queueLastDispatchTime)).toBeGreaterThan(0);
+    expect(host.dataset.queueConfirmedSends).toBe("0");
+    expect((await persisted()).items[0]?.status).toBe("sending");
+    releaseAck();
+    await waitFor(() => !tab.queue.dispatching, "durable send acknowledgement");
+    expect(host.dataset.queueConfirmedSends).toBe("1");
+    expect((await persisted()).items[0]?.status).toBe("waiting");
+    await poll(tab);
+    expect(host.dataset.queueConfirmedSends).toBe("1");
+    expect(native.sent).toHaveLength(1);
   });
 });
