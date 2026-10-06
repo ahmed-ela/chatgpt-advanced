@@ -4,6 +4,29 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-10-06
+
+### Fixed
+
+- Preserve verified ChatGPT conversation identity through cached-chat navigation, and ignore hidden cached answers when observing the first send in a new chat.
+- Capture form-submit first sends and distinguish an unverified conversation identity from an unfinished response in queue recovery guidance.
+
+## [0.3.6] - 2026-10-05
+
+### Fixed
+
+- Keep stale animation in a positively completed ChatGPT turn from blocking queued follow-ups, while retaining active response and conversation identity checks.
+- Explain draft, attachment, and unconfirmed completion holds in the queue, and expose content-free dispatch diagnostics for intermittent stalls.
+- Prevent development reloads from rebuilding the wrong checkout; support a qualified source checkout writing to an existing installed extension directory.
+
+Includes the 0.3.4 background dispatch changes for Chrome and the Firefox candidate. Live verification and release status are recorded separately; this entry does not imply store submission or publication.
+
+## [0.3.5] - 2026-10-05
+
+### Changed
+
+- Reserve version 0.3.5 for the public Mozilla submission, which retains the tested 0.3.2 runtime and omits the self-distributed update feed. It does not include the 0.3.4 background dispatch changes.
+
 ## [0.3.4] - 2026-10-04
 
 ### Fixed

@@ -5,11 +5,14 @@ import { NativeReplayGuard } from "./native-replay-guard";
 import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages,
-  getAssistantCompletionAfter, getStableUserMessageAnchor, isCurrentConversationReady,
-  registerNewConversationAlias, clearConversationAlias, composerScope, getProviderName,
+  getAssistantCompletionAfter, getStableUserMessageAnchor, isCurrentConversationReady, getCurrentConversationReadiness,
+  registerNewConversationAlias, clearConversationAlias, isEmptyNewChat, composerScope, getProviderName,
 } from "./chatgpt-dom";
 
 type QueueRuntime = Pick<ExtensionRuntime, "sendMessage" | "onMessage">;
+type QueueHold = "loading" | "empty" | "paused" | "retry-delay" | "editing" | "saving" | "reordering" |
+  "review" | "sending" | "claimed" | "waiting" | "composer-missing" | "draft" | "attachments" |
+  "chat-busy" | "anchor-unverified" | "identity-unverified" | "completion-pending" | "transcript-loading" | "ready";
 
 const ROOT = "plannotator-message-queue";
 const POLL_MS = 900;
@@ -44,6 +47,7 @@ export class MessageQueue {
   // Gemini prompt indices can be reused after a reload. Only this document's
   // own enqueue/ACK observation can authorize a temporary indexed anchor.
   private temporaryAnchors = new Set<string>();
+  private confirmedSends = new Set<string>();
   private signature = "";
   private dragId: string | null = null;
   private pointerDrag: { id: string; pointerId: number; x: number; y: number; handle: HTMLElement; toId?: string } | null = null;
@@ -62,6 +66,7 @@ export class MessageQueue {
   start(): void {
     if (document.getElementById(ROOT)) return;
     this.host.id = ROOT;
+    this.host.dataset.queueConfirmedSends = "0";
     this.host.style.cssText = "position:fixed;z-index:2147483645;pointer-events:none;display:none";
     this.shadow.innerHTML = `<style>
       :host{color-scheme:light dark;font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:light-dark(#242424,#eee)}
@@ -86,12 +91,12 @@ export class MessageQueue {
     window.addEventListener("submit", event => {
       if (this.nativeDispatch) { this.nativeReplay.observeInitialSubmit(event); return; }
       const replay = this.nativeReplay.submit(event as SubmitEvent);
-      if (replay === "allow") return;
+      if (replay === "allow") { this.markDispatchAttempt(); return; }
       if (replay === "block") { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const composer = findQueueComposer();
-      if (composer && event.target instanceof Element && event.target.contains(composer) && this.shouldQueue()) {
-        event.preventDefault(); event.stopImmediatePropagation(); void this.enqueue();
-      }
+      if (!composer || !(event.target instanceof HTMLFormElement) || !event.target.contains(composer)) return;
+      if (!this.shouldQueue()) { this.captureFirstSend(); return; }
+      event.preventDefault(); event.stopImmediatePropagation(); void this.enqueue();
     }, options);
     document.addEventListener("input", () => {
       // Native editors may commit after our capture listener. Read their final
@@ -278,7 +283,7 @@ export class MessageQueue {
     const key = getQueueKey(location.href);
     if (key !== this.key) {
       this.nativeReplay.revoke();
-      clearConversationAlias();
+      clearConversationAlias(true);
       if (!this.key && key?.startsWith("chatgpt:") && this.firstSend && !this.firstSend.key && Date.now() < this.firstSend.expiresAt) {
         this.firstSend.key = key;
       } else this.firstSend = null;
@@ -287,6 +292,7 @@ export class MessageQueue {
       this.editRevision++; this.retryAfter = 0;
       this.pendingSave = null; this.signature = "";
     }
+    if (this.firstSend && !this.firstSend.key && Date.now() >= this.firstSend.expiresAt) this.firstSend = null;
     if (key && this.firstSend?.key === key && registerNewConversationAlias(key, this.firstSend.text)) this.firstSend = null;
     return key;
   }
@@ -294,9 +300,7 @@ export class MessageQueue {
   private captureFirstSend(): void {
     // A temporary conversation identity is trusted only after observing this
     // tab send the first message from a genuinely empty new-chat page.
-    if (location.hostname !== "chatgpt.com" || location.pathname !== "/" || getVisibleUserMessages().length ||
-        Array.from(document.querySelectorAll("[data-markdown-text-style='assistant-message'],[data-message-author-role='assistant'],[data-chatgpt-selection-conversation-id]"))
-          .some(element => element.getClientRects().length)) return;
+    if (!isEmptyNewChat()) return;
     const composer = findQueueComposer();
     const text = composer && readComposer(composer);
     if (text?.trim() && !hasComposerAttachments()) this.firstSend = { text, expiresAt: Date.now() + 120000 };
@@ -393,7 +397,7 @@ export class MessageQueue {
   private onNativeClick(event: MouseEvent): void {
     if (this.nativeDispatch) { this.nativeReplay.observeInitialClick(event); return; }
     const replay = this.nativeReplay.click(event);
-    if (replay === "allow") return;
+    if (replay === "allow") { this.markDispatchAttempt(); return; }
     if (replay === "block") { event.preventDefault(); event.stopImmediatePropagation(); return; }
     const send = findQueueSendButton();
     if (!send || !event.composedPath().includes(send)) return;
@@ -438,13 +442,36 @@ export class MessageQueue {
   }
 
   private canDispatch(): boolean {
-    const composer = findQueueComposer();
-    return Boolean(this.state && this.state.items.length && !this.state.paused &&
-      Date.now() >= this.retryAfter &&
-      !this.state.items.some(item => item.status !== "queued") &&
-      !this.editing && !this.saving && !this.dragId && !this.pointerDrag &&
-      composer && !readComposer(composer).trim() && !hasComposerAttachments() &&
-      !isChatBusy() && this.transcriptReady());
+    return this.dispatchHold() === "ready";
+  }
+
+  /** Explain the same guards used for dispatch; never relax them for a status. */
+  private dispatchHold(composer = findQueueComposer()): QueueHold {
+    if (!this.state) return "loading";
+    if (!this.state.items.length) return "empty";
+    if (this.state.paused) return "paused";
+    if (Date.now() < this.retryAfter) return "retry-delay";
+    if (this.editing || this.state.items.some(item => item.status === "editing")) return "editing";
+    if (this.saving) return "saving";
+    if (this.dragId || this.pointerDrag) return "reordering";
+    for (const status of ["review", "sending", "claimed", "waiting"] as const) {
+      if (this.state.items.some(item => item.status === status)) {
+        if (status === "waiting" && composer && !readComposer(composer).trim() && !hasComposerAttachments() &&
+            !isChatBusy() && getCurrentConversationReadiness() === "identity-unverified") return "identity-unverified";
+        return status;
+      }
+    }
+    if (!composer) return "composer-missing";
+    if (readComposer(composer).trim()) return "draft";
+    if (hasComposerAttachments()) return "attachments";
+    if (isChatBusy()) return "chat-busy";
+    const anchor = this.state.lastCompletedUserMessageId;
+    if (anchor && !this.canUseAnchor(anchor)) return "anchor-unverified";
+    if (!this.transcriptReady()) {
+      if (getCurrentConversationReadiness() === "identity-unverified") return "identity-unverified";
+      return anchor ? "completion-pending" : "transcript-loading";
+    }
+    return "ready";
   }
 
   private transcriptReady(): boolean {
@@ -455,6 +482,16 @@ export class MessageQueue {
 
   private canUseAnchor(userId: string): boolean {
     return !userId.startsWith("gemini:user:user-query-content-") || this.temporaryAnchors.has(userId);
+  }
+
+  private markConfirmedSend(id: string): void {
+    this.confirmedSends.add(id);
+    this.host.dataset.queueConfirmedSends = String(this.confirmedSends.size);
+  }
+
+  private markDispatchAttempt(): void {
+    this.host.dataset.queueLastDispatchVisibility = document.visibilityState;
+    this.host.dataset.queueLastDispatchTime = String(Date.now());
   }
 
   private async dispatch(sendNowId?: string): Promise<void> {
@@ -554,6 +591,7 @@ export class MessageQueue {
       });
       this.nativeDispatch = true;
       composer.setAttribute("data-plannotator-queued-send", item.id);
+      this.markDispatchAttempt();
       try { send.click(); } finally {
         this.nativeDispatch = false; this.nativeReplay.finishInitial();
         composer.removeAttribute("data-plannotator-queued-send");
@@ -564,6 +602,7 @@ export class MessageQueue {
           this.temporaryAnchors.add(posted.id);
           postedUserMessageId = getStableUserMessageAnchor(posted.id) ?? posted.id;
           await this.request("ack", { id: item.id, userMessageId: postedUserMessageId }, key);
+          this.markConfirmedSend(item.id);
           this.error = ""; return;
         }
         await this.waitForDomChange(300);
@@ -576,6 +615,7 @@ export class MessageQueue {
           // The acknowledgement can commit while its IPC reply is lost. A
           // confirmed store record wins over this tab's transport error.
           if (attempted && result.state.items.some(entry => entry.id === item!.id && entry.status === "waiting" && entry.userMessageId)) {
+            this.markConfirmedSend(item.id);
             this.error = ""; return;
           }
         } catch {
@@ -588,6 +628,7 @@ export class MessageQueue {
               if (!result.state.items.some(entry => entry.id === item!.id) &&
                   (result.state.lastCompletedUserMessageId === postedUserMessageId ||
                     result.state.lastCompletedUserMessageId === getStableUserMessageAnchor(postedUserMessageId))) {
+                this.markConfirmedSend(item.id);
                 this.error = ""; return;
               }
             } catch { /* No durable confirmation: keep the error visible. */ }
@@ -773,6 +814,22 @@ export class MessageQueue {
     const draft = composer ? readComposer(composer).trim() : "";
     if (composer && !draft && !hasComposerAttachments() && [SEND_DRAFT_WARNING, EDIT_DRAFT_WARNING].includes(this.error)) this.error = "";
     const busy = isChatBusy();
+    const hold = this.dispatchHold(composer);
+    // DOM-only diagnostics make a stalled queue inspectable without exposing
+    // message content, conversation IDs, ownership tokens, or stored drafts.
+    const routeReady = Boolean(this.key && getQueueKey(location.href) === this.key);
+    const workerBusy = Boolean(this.state?.busyUntil && this.state.busyUntil > Date.now());
+    const diagnostic = !routeReady ? "route-unavailable" : this.dispatching ? "dispatching" :
+      hold === "ready" && workerBusy ? "response-in-another-tab" : hold;
+    if (this.host.dataset.queueState !== diagnostic) {
+      this.host.dataset.queueState = diagnostic;
+      this.host.dataset.queueStateSince = String(Date.now());
+    }
+    if (!["empty", "loading", "ready", "dispatching"].includes(diagnostic)) this.host.dataset.queueLastHold = diagnostic;
+    this.host.dataset.queueRouteReady = String(routeReady);
+    this.host.dataset.queueHasAnchor = String(Boolean(this.state?.lastCompletedUserMessageId));
+    this.host.dataset.queueWorkerBusy = String(workerBusy);
+    this.host.dataset.queueVisibility = document.visibilityState;
     const showAdd = Boolean(draft && (busy || allItems.length || this.state?.paused));
     const unknownAnchor = Boolean(this.state?.lastCompletedUserMessageId && !this.canUseAnchor(this.state.lastCompletedUserMessageId)) ||
       allItems.some(item => item.status === "waiting" && item.userMessageId && !this.canUseAnchor(item.userMessageId));
@@ -780,6 +837,15 @@ export class MessageQueue {
       !draft && getQueueKey(location.href) === this.key && items.some(item => item.status === "queued") &&
       allItems.every(item => item.status === "queued" || item.status === "waiting") && unknownAnchor && isCurrentConversationReady()
       ? "This older queue needs confirmation after reopening. Use Send now on the first message to continue." : "";
+    // Put useful holds beside the next queued item. Routine busy/paused state
+    // stays in the native response and Pause/Resume control, without a footer.
+    const waiting = this.error || recovery || this.dispatching ? "" :
+      hold === "draft" ? "Queue or clear your draft to continue." :
+      hold === "attachments" ? "Send or remove your attachment to continue." :
+      hold === "identity-unverified" ? "Reload after the response finishes to reconnect the queue." :
+      !busy && (hold === "completion-pending" || hold === "waiting")
+        ? `Waiting for ${getProviderName()} to confirm this response finished.` :
+      hold === "transcript-loading" ? "Waiting for this conversation to finish loading." : "";
     if (!this.key || !composer || (!items.length && !showAdd && !this.error && !this.state?.paused)) {
       this.host.style.display = "none";
       this.panel.replaceChildren(); this.signature = "";
@@ -787,7 +853,7 @@ export class MessageQueue {
     }
     if (!this.host.isConnected) document.body.append(this.host);
     this.host.style.display = "block";
-    const signature = JSON.stringify([items, this.state?.paused, showAdd, this.saving, this.editingBusy, this.dispatching, this.expanded, this.editing, this.error, recovery]);
+    const signature = JSON.stringify([items, this.state?.paused, showAdd, this.saving, this.editingBusy, this.dispatching, this.expanded, this.editing, this.error, recovery, waiting]);
     if (signature !== this.signature && !this.dragId && !this.pointerDrag) {
       this.signature = signature;
       this.panel.innerHTML = `<header>
@@ -795,19 +861,19 @@ export class MessageQueue {
         ${items.length || this.state?.paused ? `<button data-action="pause" aria-label="${this.state?.paused ? "Resume" : "Pause"} queue">${icon(this.state?.paused ? "play" : "pause", 14)}${this.state?.paused ? "Resume" : "Pause"}</button>` : ""}
         ${showAdd ? `<button class="add" data-action="enqueue" ${this.saving || this.editingBusy ? "disabled" : ""}>${icon(this.saving || this.editingBusy ? "loader" : this.editing ? "check" : "plus", 14)}${this.saving || this.editingBusy ? "Saving…" : this.editing ? "Save edit" : "Queue message"}</button>` : ""}
       </header>
-      ${this.expanded && items.length ? `<ol>${items.map((item, index) => this.itemHtml(item, index)).join("")}</ol>` : ""}
+      ${this.expanded && items.length ? `<ol>${items.map((item, index) => this.itemHtml(item, index, index === items.findIndex(entry => entry.status === "queued") ? waiting : "")).join("")}</ol>` : ""}
       ${this.error ? `<div class="error" role="status">${escapeHtml(this.error)} <button data-action="check">Check again</button></div>` :
         recovery ? `<div class="error" role="status">${recovery}</div>` : ""}`;
     }
     this.position();
   }
 
-  private itemHtml(item: QueueItem, index: number): string {
+  private itemHtml(item: QueueItem, index: number, waiting = ""): string {
     const id = escapeHtml(item.id);
     if (this.editing === item.id) return `<li data-id="${id}"><span class="order-slot"><span class="num">${index + 1}</span></span><div class="body"><div class="text">${escapeHtml(item.text)}</div><div class="status">Editing in composer · position reserved</div><div class="edit-tools"><button class="add" data-action="save" ${this.editingBusy ? "disabled" : ""}>Save edit</button><button data-action="cancel-edit" ${this.editingBusy ? "disabled" : ""}>Cancel edit</button></div></div><div class="tools"><button data-action="remove" aria-label="Remove message ${index + 1}" title="Delete queued message" ${this.editingBusy ? "disabled" : ""}>${icon("trash")}</button></div></li>`;
     const pending = item.status === "queued";
     const blocked = Boolean(this.editing || this.saving || this.dispatching || this.state?.items.some(entry => ["editing", "claimed", "sending", "review"].includes(entry.status)));
-    const status = item.status === "editing" ? "Editing in a composer · position reserved" : item.status === "claimed" ? "Preparing…" : item.status === "sending" ? "Confirming send…" : item.status === "review" ? "Send unconfirmed · check this chat before retrying" : "";
+    const status = item.status === "editing" ? "Editing in a composer · position reserved" : item.status === "claimed" ? "Preparing…" : item.status === "sending" ? "Confirming send…" : item.status === "review" ? "Send unconfirmed · check this chat before retrying" : waiting;
     const order = pending ? `<button class="order-slot drag-handle" draggable="true" aria-label="Reorder message ${index + 1}" title="Drag to reorder; use arrow keys when focused"><span class="num" aria-hidden="true">${index + 1}</span>${grip}</button>` : `<span class="order-slot"><span class="num">${index + 1}</span></span>`;
     return `<li data-id="${id}" data-user-message-id="${escapeHtml(item.userMessageId ?? "")}">${order}<div class="body"><div class="text">${escapeHtml(item.text)}</div>${status ? `<div class="status ${item.status === "review" ? "review" : ""}">${status}</div>` : ""}
       ${item.status === "review" ? `<div class="edit-tools"><button data-action="retry" title="Retry only after checking that it was not sent" ${this.saving || this.dispatching || this.editing || this.editingBusy ? "disabled" : ""}>Retry message</button><button data-action="resolve">Dismiss from queue</button></div>` : ""}</div>

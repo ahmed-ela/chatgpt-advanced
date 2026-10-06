@@ -2,9 +2,11 @@ import { closeSync, mkdirSync, openSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { appDir, defaultDevPort } from "./build-lib";
+import { devIdentity, parseDevVersion } from "./dev-identity";
 
 const devOrigin = `http://127.0.0.1:${defaultDevPort}`;
 const logPath = resolve(appDir, ".local/plannotator-dev.log");
+const identity = devIdentity(appDir, process.env.PLANNOTATOR_EXTENSION_DEV_OUTDIR);
 
 try {
   await reload();
@@ -54,7 +56,7 @@ async function reload(): Promise<void> {
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) throw new Error(`Dev rebuild failed (HTTP ${response.status}). See ${logPath}`);
-  const built = parseVersion(await response.json());
+  const built = parseDevVersion(await response.json(), identity).buildId;
   if (built === "booting" || built === previous) {
     throw new Error(`The watcher did not produce a new successful build. See ${logPath}`);
   }
@@ -62,6 +64,8 @@ async function reload(): Promise<void> {
   if (!confirmed || confirmed === "booting") throw new Error(`Could not verify the rebuilt extension. See ${logPath}`);
 
   console.log(`[browser-extension] built ${built}`);
+  console.log(`[browser-extension] source: ${identity.sourceRoot}`);
+  console.log(`[browser-extension] output: ${identity.outputDir}`);
   console.log(`[browser-extension] watcher logs: ${logPath}`);
   console.log("[browser-extension] the watcher remains running and rebuilds future source edits automatically.");
   console.log("[browser-extension] one-time setup: Reload Threadlane in chrome://extensions, then refresh ChatGPT to activate the dev reload hook.");
@@ -80,12 +84,8 @@ async function readVersion(): Promise<string | null> {
     throw new Error(`Cannot reach the dev watcher at ${devOrigin}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (!response.ok) throw new Error(`A service at ${devOrigin} returned HTTP ${response.status}; refusing to start a second watcher.`);
-  try { return parseVersion(await response.json()); }
-  catch { throw new Error(`The service at ${devOrigin} is not a Threadlane dev watcher.`); }
-}
-
-function parseVersion(value: unknown): string {
-  const buildId = value && typeof value === "object" ? (value as { buildId?: unknown }).buildId : undefined;
-  if (typeof buildId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(buildId)) throw new Error("Invalid dev build response");
-  return buildId;
+  try { return parseDevVersion(await response.json(), identity).buildId; }
+  catch (error) {
+    throw new Error(`Cannot use the dev watcher at ${devOrigin}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

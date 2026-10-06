@@ -1,6 +1,6 @@
 # Store listing draft
 
-Status: Threadlane public submission is authorized. Publisher registration was completed, and the last recorded public Chrome submission is 0.2.5, pending review with automatic publication after approval; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). Approval or public availability has not been verified. This listing draft now describes candidate 0.3.4, which has not been uploaded. Review it against the final tested package before replacing the submission.
+Status: Threadlane 0.3.6 replaced the pending public Chrome 0.2.5 submission on 2026-10-05. The dashboard confirmed **Pending review**, Public distribution, and automatic publication after approval; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). The description below was saved with that submission. Approval and public availability have not been verified.
 
 ## Name
 

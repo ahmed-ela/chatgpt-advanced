@@ -2,8 +2,10 @@ import { watch } from "node:fs";
 import { resolve } from "node:path";
 
 import { appDir, buildExtension, createBuildId, defaultDevPort } from "./build-lib";
+import { devIdentity } from "./dev-identity";
 
 const devPort = defaultDevPort;
+const identity = devIdentity(appDir, process.env.PLANNOTATOR_EXTENSION_DEV_OUTDIR);
 const devOrigin = `http://127.0.0.1:${devPort}`;
 const versionPath = "/__plannotator/version";
 const rebuildPath = "/__plannotator/rebuild";
@@ -29,7 +31,7 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   port: devPort,
   routes: {
-    [versionPath]: () => Response.json({ buildId: currentBuildId }, {
+    [versionPath]: () => Response.json({ buildId: currentBuildId, ...identity }, {
       headers: corsHeaders,
     }),
     [rebuildPath]: async (request) => {
@@ -52,7 +54,7 @@ const server = Bun.serve({
       }
 
       await requestRebuild("manual request");
-      return Response.json({ buildId: currentBuildId }, {
+      return Response.json({ buildId: currentBuildId, ...identity }, {
         headers: corsHeaders,
       });
     },
@@ -69,7 +71,7 @@ const server = Bun.serve({
 
 console.log(`[browser-extension] watching source and release metadata in ${appDir}`);
 console.log(`[browser-extension] dev server ${devOrigin}${versionPath}`);
-console.log(`[browser-extension] load unpacked ${resolve(appDir, "dist")} once, then keep this running`);
+console.log(`[browser-extension] load unpacked ${identity.outputDir} once, then keep this running`);
 
 for (const target of watchTargets) {
   watch(target.path, { recursive: target.recursive }, (_eventType, filename) => {
@@ -116,6 +118,7 @@ async function runRebuildLoop(): Promise<void> {
         dev: true,
         buildId: nextBuildId,
         devOrigin,
+        outdir: identity.outputDir,
       });
       currentBuildId = nextBuildId;
       console.log(`[browser-extension] built ${currentBuildId} (${reason})`);

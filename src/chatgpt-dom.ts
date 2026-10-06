@@ -20,7 +20,18 @@ const MESSAGE_SELECTOR = `${USER_SELECTOR}, ${ASSISTANT_SELECTOR}`;
 const STOP_LABEL = /^(?:stop|pause)(?:$|[\s…])/i;
 const SEND_LABEL = /^(?:send|send message|send prompt)$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-let conversationAlias: { routeKey: string; localId: string; firstUserId: string } | null = null;
+interface ConversationAlias { routeKey: string; localId: string; firstUserId: string; }
+let conversationAlias: ConversationAlias | null = null;
+let aliasDocument: Document | null = null;
+const verifiedAliases = new Map<string, ConversationAlias>();
+const MAX_VERIFIED_ALIASES = 16;
+
+function ensureAliasDocument(): void {
+  if (aliasDocument === document) return;
+  aliasDocument = document;
+  conversationAlias = null;
+  verifiedAliases.clear();
+}
 
 // Do not use viewport position: a message can be above the fold, and background
 // tabs still need to reconcile submitted messages after a browser restart.
@@ -194,12 +205,31 @@ export function isChatBusy(): boolean {
   // The stable stop testid is safe outside a known wrapper; a generic Pause
   // label elsewhere can belong to read-aloud playback and must not queue sends.
   if (Array.from(document.querySelectorAll("button[data-testid='stop-button']")).some(isVisible)) return true;
+  if (hasLoadingState()) return true;
   // Live streaming bodies do not receive their final message ID until the
-  // generation is committed. Animation alone is not enough: it may persist.
-  if (Array.from(document.querySelectorAll<HTMLElement>("[data-markdown-animated]")).some((body) =>
+  // generation is committed. A completed turn can retain a separate animated
+  // thinking body, so reconcile that body with positive same-turn evidence.
+  const uncommitted = Array.from(document.querySelectorAll<HTMLElement>("[data-markdown-animated]")).filter((body) =>
     isVisible(body) && !body.closest("[data-chatgpt-selection-message-id], [data-message-id]"),
-  )) return true;
-  return hasLoadingState();
+  );
+  if (!uncommitted.length) return false;
+  if (currentProvider() !== "chatgpt") return true;
+  const messages = currentConversationMessages();
+  const latest = messages?.at(-1);
+  if (!messages || latest?.role !== "assistant") return true;
+  const latestUser = [...messages].reverse().find((message) => message.role === "user");
+  if (!latestUser || !chatGptCompletionContainer(latest, latestUser.id, messages)) return true;
+  return uncommitted.some((body) => {
+    // A new answer body, or animation after the committed reply, can be a new
+    // generation. Never let an old toolbar authorize either of those states.
+    if (body.closest(ASSISTANT_SELECTOR) || body.querySelector(MESSAGE_SELECTOR)) return true;
+    const assistantIndex = messages.findIndex((message) => message.role === "assistant" &&
+      !!(body.compareDocumentPosition(message.element) & body.DOCUMENT_POSITION_FOLLOWING));
+    const assistant = messages[assistantIndex];
+    const user = messages.slice(0, assistantIndex).reverse().find((message) => message.role === "user");
+    if (!assistant || !user || !(user.element.compareDocumentPosition(body) & body.DOCUMENT_POSITION_FOLLOWING)) return true;
+    return !chatGptCompletionContainer(assistant, user.id, messages, body);
+  });
 }
 
 export function hasComposerAttachments(): boolean {
@@ -269,8 +299,16 @@ function visibleConversationIds(): string[] {
     .filter(isVisible).map((marker) => marker.getAttribute("data-chatgpt-selection-conversation-id")!);
 }
 
+/** Hidden cached turns must not turn a genuinely empty new chat into an old one. */
+export function isEmptyNewChat(): boolean {
+  return window.location.hostname === "chatgpt.com" && window.location.pathname === "/" &&
+    !!findQueueComposer() && !isChatBusy() &&
+    !Array.from(document.querySelectorAll(`${MESSAGE_SELECTOR}, [data-chatgpt-selection-conversation-id]`)).some(isVisible);
+}
+
 /** Only the UI's observed first-send/new-chat transition may call this. */
 export function registerNewConversationAlias(routeKey: string, firstMessageText: string): boolean {
+  ensureAliasDocument();
   if (!routeKey.startsWith("chatgpt:") || getQueueKey(window.location.href) !== routeKey) return false;
   // Never let the same document's local ID silently migrate to another route.
   // The UI clears the binding whenever the observed route changes.
@@ -284,31 +322,59 @@ export function registerNewConversationAlias(routeKey: string, firstMessageText:
   if (!localId?.startsWith("local-chatgpt:") || !UUID_PATTERN.test(localId.slice("local-chatgpt:".length)) ||
       markerIds.some((id) => id !== localId)) return false;
   if (conversationAlias && (conversationAlias.localId !== localId || conversationAlias.firstUserId !== firstUser.id)) return false;
+  // A previously verified local transcript cannot acquire a different saved
+  // route just because navigation temporarily leaves its DOM mounted.
+  if (Array.from(verifiedAliases.values()).some(alias => alias.localId === localId && alias.routeKey !== routeKey)) return false;
   conversationAlias = { routeKey, localId, firstUserId: firstUser.id };
+  verifiedAliases.delete(routeKey);
+  verifiedAliases.set(routeKey, conversationAlias);
+  if (verifiedAliases.size > MAX_VERIFIED_ALIASES) verifiedAliases.delete(verifiedAliases.keys().next().value!);
   return true;
 }
 
-export function clearConversationAlias(): void { conversationAlias = null; }
+export function clearConversationAlias(retainVerified = false): void {
+  conversationAlias = null;
+  if (retainVerified) ensureAliasDocument();
+  else { verifiedAliases.clear(); aliasDocument = null; }
+}
+
+type ConversationReadiness = "ready" | "loading" | "identity-unverified";
+type ConversationState = { status: "ready"; messages: MessageRecord[] } |
+  { status: Exclude<ConversationReadiness, "ready">; messages: null };
 
 // Return records for this synchronous validation only. Callers must read again
 // after an await or DOM change; route and completion evidence is never cached.
-function currentConversationMessages(): MessageRecord[] | null {
+function currentConversationState(): ConversationState {
+  ensureAliasDocument();
   const key = getQueueKey(window.location.href);
-  if (!key || !findQueueComposer() || (currentProvider() === "chatgpt" && hasLoadingState())) return null;
+  if (conversationAlias && conversationAlias.routeKey !== key) conversationAlias = null;
+  if (!key || !findQueueComposer() || (currentProvider() === "chatgpt" && hasLoadingState())) return { status: "loading", messages: null };
   const messages = visibleMessages();
-  if (!messages.length) return null;
-  if (currentProvider() !== "chatgpt") return providerConversationReady(key, messages) ? messages : null;
+  if (!messages.length) return { status: "loading", messages: null };
+  if (currentProvider() !== "chatgpt") return providerConversationReady(key, messages)
+    ? { status: "ready", messages } : { status: "loading", messages: null };
   if (key.startsWith("chatgpt:")) {
     const id = key.slice("chatgpt:".length);
     const markerIds = visibleConversationIds();
-    if (!markerIds.length) return null;
+    if (!markerIds.length) return { status: "identity-unverified", messages: null };
     if (markerIds.some((markerId) => markerId !== id)) {
-      if (!conversationAlias || conversationAlias.routeKey !== key ||
-          markerIds.some((markerId) => markerId !== conversationAlias!.localId) ||
-          !messages.some((message) => message.role === "user" && message.id === conversationAlias!.firstUserId)) return null;
+      // Restoration authorizes only the exact tuple this document observed on
+      // a real first send. URL and matching text alone never create an alias.
+      const alias = conversationAlias ?? verifiedAliases.get(key);
+      if (!alias || alias.routeKey !== key || markerIds.some((markerId) => markerId !== alias.localId) ||
+          messages.find(message => message.role === "user")?.id !== alias.firstUserId) return { status: "identity-unverified", messages: null };
+      conversationAlias = alias;
     }
   }
-  return messages;
+  return { status: "ready", messages };
+}
+
+function currentConversationMessages(): MessageRecord[] | null {
+  return currentConversationState().messages;
+}
+
+export function getCurrentConversationReadiness(): ConversationReadiness {
+  return currentConversationState().status;
 }
 
 export function isCurrentConversationReady(): boolean {
@@ -346,22 +412,27 @@ export function getAssistantCompletionAfter(userId: string): boolean {
   }
   if (!assistant) return false;
   if (currentProvider() !== "chatgpt") return providerCompletion(assistant, isVisible);
+  return chatGptCompletionContainer(assistant, userId, messages) !== null;
+}
+
+function chatGptCompletionContainer(assistant: MessageRecord, userId: string, messages: MessageRecord[], alongside?: HTMLElement): HTMLElement | null {
   // In the current layout the toolbar is a sibling several wrappers above the
   // body, alongside this same turn's user bubble. Stop before another turn.
   let container: HTMLElement | null = assistant.element;
   for (let depth = 0; container && depth < 8; depth++, container = container.parentElement) {
     if (container === document.body || container.matches("main, [role='main']")) break;
     const containedMessages = messages.filter((message) => container!.contains(message.element));
-    if (containedMessages.some((message) => message.role === "user" ? message.id !== userId : message.id !== assistant!.id)) break;
+    if (containedMessages.some((message) => message.role === "user" ? message.id !== userId : message.id !== assistant.id)) break;
+    if (alongside && !container.contains(alongside)) continue;
     const controls = Array.from(container.querySelectorAll("button")).filter(isVisible);
-    if (controls.some((button) => /^(?:copy-turn-action-button|good-response-turn-action-button|bad-response-turn-action-button)$/.test(button.getAttribute("data-testid") ?? ""))) return true;
+    if (controls.some((button) => /^(?:copy-turn-action-button|good-response-turn-action-button|bad-response-turn-action-button)$/.test(button.getAttribute("data-testid") ?? ""))) return container;
     // A code-block Copy button is never completion proof. Require the current
     // response toolbar's separate rating and copy actions outside the body.
     const labels = controls.filter((button) => !button.closest(ASSISTANT_SELECTOR))
       .map((button) => (button.getAttribute("aria-label") ?? "").trim().toLowerCase());
-    if (labels.includes("rate response") && (labels.includes("copy") || labels.includes("copy response"))) return true;
+    if (labels.includes("rate response") && (labels.includes("copy") || labels.includes("copy response"))) return container;
   }
-  return false;
+  return null;
 }
 
 export function getProviderName(): "ChatGPT" | "Claude" | "Gemini" {
