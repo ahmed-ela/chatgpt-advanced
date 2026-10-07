@@ -1,16 +1,36 @@
 # Chrome Web Store submission status
 
-Latest update verified in the Threadlane publisher dashboard on **2026-10-07 at 13:00:04.533 UTC**.
+Latest update verified in the Threadlane publisher dashboard on **2026-10-07 at 13:16:53.511 UTC**.
 
-**Update 0.3.10 is pending review**, store revision `00005`, on the existing public item. Automatic publication after approval is enabled. Matching Claude and Gemini screenshots now accompany the original ChatGPT screenshot in the submitted listing. Pending review is not approval or availability of the update or new screenshots.
+**Update 0.3.11 is pending review**, store revision `00006`, on the existing public item. Automatic publication after approval is enabled. The supplied flame icon and matching promotional tile are saved in the submitted listing, along with the ChatGPT, Claude, and Gemini screenshots. Pending review is not approval or availability of the update or new artwork.
 
 **Version 0.3.6 is published and publicly available.** The listing shows version 0.3.6, an Updated date of October 7, 2026, and Add to Chrome. [Install Threadlane](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
-The submitted **0.3.10 production package** includes the later identity and send-acknowledgement fixes, plus the queue header hover adjustment. Source commits and local builds do not change the live Store version. See [the queue hover release report](QUEUE_HOVER_0.3.10.md) for the runtime change, verification, and local deployment limits.
+The submitted **0.3.11 production package** retains the identity, send-acknowledgement, and queue header hover changes from 0.3.10 and replaces the four extension icon PNGs. Source commits and local builds do not change the live Store version. See [the icon release report](ICON_RELEASE_0.3.11.md) for exact asset provenance and package verification, and [the queue hover release report](QUEUE_HOVER_0.3.10.md) for the preceding runtime change and local deployment limits.
 
 Public-listing evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
 
-## Current public update 0.3.10
+## Current public update 0.3.11
+
+- Publisher/account: Threadlane, `threadlane.support@gmail.com`.
+- Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
+- Store revision: `00006`.
+- Update status: **Pending review**; published version remains **0.3.6**.
+- Distribution: existing Public, all-regions, free channel retained.
+- Automatic publication after approval: enabled; the checked submission dialog was captured before final submission.
+- Confirmation: **2026-10-07 at 13:16:53.511 UTC**.
+
+Submitted package: `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/chrome-web-store-0.3.11/release/0.3.11/threadlane-0.3.11.zip`.
+
+SHA-256: `06b21bfc332187acfff75eaf28b16875b8183d90815f574211c8aa2427ac2153`.
+
+The previous 0.3.10 review was canceled, the verified 0.3.11 archive uploaded, the separate Store icon and promotional tile replaced after user confirmation, and the listing saved and successfully resubmitted. All three provider screenshots remain present. Only the four icon PNGs and manifest version differ from the 0.3.10 production archive; runtime scripts and permissions are byte-identical or unchanged. All 577 tests, TypeScript, version consistency, production package validation, and independent asset review passed.
+
+Evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/chrome-web-store-0.3.11/`: `preparation.json`, `submission.json`, `automatic-publication.jpg`, `submitted-success.jpg`, `pending-listing-ax.txt`, `pending-flame-icon.jpg`, `pending-package-ax.txt`, and `pending-package-0.3.11.jpg`. The package page showed pending draft version 0.3.11, revision 00006, and published version 0.3.6. Shared source icons apply to future Firefox builds; no Firefox signing, Mozilla submission, or update-feed promotion was performed by this Chrome workflow.
+
+## Historical public submission 0.3.10
+
+The following records the October 7 submission that was subsequently canceled and replaced by the 0.3.11 icon release above. Its pending status is historical.
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.

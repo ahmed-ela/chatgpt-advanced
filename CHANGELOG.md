@@ -4,6 +4,12 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-10-07
+
+### Changed
+
+- Use the supplied black flame artwork for extension icons and matching Chrome Store branding. Queue behavior and permissions are unchanged.
+
 ## [0.3.10] - 2026-10-07
 
 ### Fixed
