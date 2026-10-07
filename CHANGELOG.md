@@ -4,6 +4,12 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-10-07
+
+### Fixed
+
+- Keep the queue header background unchanged on hover, while preserving row numbers, reorder handles, and action-button feedback.
+
 ## [0.3.9] - 2026-10-07
 
 ### Fixed

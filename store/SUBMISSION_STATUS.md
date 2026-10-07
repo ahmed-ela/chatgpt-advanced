@@ -1,8 +1,32 @@
 # Chrome Web Store submission status
 
-Verified in the Threadlane publisher dashboard on **2026-10-05 at 18:03:41 UTC**.
+Latest update verified in the Threadlane publisher dashboard on **2026-10-07 at 12:35:57.226 UTC**.
 
-**Version 0.3.6 is pending review. It is not published.** It replaced the pending 0.2.5 submission on the same public item. This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+**Update 0.3.10 is pending review**, store revision `00004`, on the existing public item. Automatic publication after approval is enabled. Pending review is not approval or availability of the update.
+
+**Version 0.3.6 is published and publicly available.** The listing shows version 0.3.6, an Updated date of October 7, 2026, and Add to Chrome. [Install Threadlane](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+
+The submitted **0.3.10 production package** includes the later identity and send-acknowledgement fixes, plus the queue header hover adjustment. Source commits and local builds do not change the live Store version. See [the queue hover release report](QUEUE_HOVER_0.3.10.md) for the runtime change, verification, and local deployment limits.
+
+Public-listing evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
+
+## Current public update 0.3.10
+
+- Publisher/account: Threadlane, `threadlane.support@gmail.com`.
+- Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
+- Store revision: `00004`.
+- Update status: **Pending review**; published version remains **0.3.6**.
+- Distribution: Public, all regions, free of charge.
+- Automatic publication after approval: enabled.
+- Confirmation: **2026-10-07 at 12:35:57.226 UTC**.
+
+Submitted package: `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/work/queue-hover-highlight/.local/release/0.3.10/threadlane-0.3.10.zip`.
+
+SHA-256: `f4655b32987f0467d99cbece042143b0b262e87e0057e9db4e5a7fa722276dfe`.
+
+The exact archive passed production release validation. Relative to the verified 0.3.9 package, only the manifest version and the queue UI hover rule differ; all remaining production files are identical. Firefox signing, its public submission, and its update feed were not changed by this Chrome upload.
+
+Evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/chrome-web-store-0.3.10/`: `submission.json`, `pending-package-ax.txt`, `pending-status-ax.txt`, `pending-package-0.3.10.png`, `pending-0.3.10.png`, and `submitted-success.png`. The dashboard displayed the submitted version and revision as well as the published 0.3.6 version.
 
 ## Separate unlisted beta
 
@@ -10,7 +34,9 @@ Verified in the Threadlane publisher dashboard on **2026-10-05 at 18:03:41 UTC**
 
 The 0.3.2 beta package and listing materials are prepared, but beta item creation/upload was not confirmed after the file-picker failure. There is no verified beta installation link yet. Resume the separate-item workflow in [BETA_DISTRIBUTION.md](BETA_DISTRIBUTION.md), then record the beta item ID, version, visibility, and observed review/publication status. The beta also needs its own Google review.
 
-## Public submission details
+## Historical public submission 0.3.6
+
+The details below record the **2026-10-05 at 18:03:41 UTC** submission, before 0.3.6 was verified published on October 7. Its then-pending status does not describe the current published version or the newer update.
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
@@ -28,7 +54,7 @@ Source attribution: the qualified checkout `/Users/ahmedelamin/repos/projects/th
 
 Evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/chrome-web-store-0.3.6/`: `preparation.json`, `working-tree.patch`, `submission.json`, `pending-0.3.6.png`, `submitted-success.png`, and the distribution/automatic-publication screenshots. Firefox's public 0.3.5 review and signed 0.3.2 feed were not changed.
 
-Store approval, public availability, and installation from the published listing still require separate verification.
+At that submission, approval, public availability, and installation required separate verification. The October 7 public-listing check above subsequently confirmed availability of 0.3.6; installation verification is a separate check.
 
 ## Historical public submission 0.2.5
 
