@@ -25,6 +25,6 @@ Preparation evidence and exact file comparison are recorded in `outputs/chrome-w
 
 ## Distribution
 
-The 0.3.11 Chrome ZIP has been uploaded to the existing public item. Its previous 0.3.10 review was canceled to permit this update; published 0.3.6 remains available. Replacing the separate Store icon and promotional image requires a browser-control confirmation because Google's removal dialog says the operation cannot be undone. That confirmation is pending; the new listing has not yet been submitted for review.
+The 0.3.11 Chrome ZIP, separate Store icon, and matching promotional image were saved and successfully submitted to the existing public item. Google confirmed **Pending review**, revision `00006`, on **2026-10-07 at 13:16:53.511 UTC**, with automatic publication after approval enabled. Its previous 0.3.10 review was canceled to permit this update; published 0.3.6 remains available.
 
-All three provider screenshots remain in the draft. The final review version, revision, date, and automatic-publication setting must be confirmed and recorded in [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) after submission. Shared source assets apply to future Firefox builds; this Chrome workflow does not sign a Firefox release, change Mozilla's submission, or update its feed.
+All three provider screenshots remain in the submitted listing. The confirmed review state and evidence are recorded in [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). The new icon release is not yet confirmed publicly available. Shared source assets apply to future Firefox builds; this Chrome workflow does not sign a Firefox release, change Mozilla's submission, or update its feed.

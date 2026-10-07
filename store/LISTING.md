@@ -1,6 +1,6 @@
 # Store listing draft
 
-Status: Threadlane **0.3.6 is published and publicly available**, verified on October 7, 2026. Update **0.3.10 is pending review** with automatic publication after approval. Its listing was resubmitted on October 7 with matching ChatGPT, Claude, and Gemini screenshots; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). The description below matches the submitted listing. The newer update and screenshots are not yet confirmed public.
+Status: Threadlane **0.3.6 is published and publicly available**, verified on October 7, 2026. Update **0.3.11 is pending review** with automatic publication after approval. Its listing was resubmitted on October 7 with the supplied flame icon, matching promotional tile, and all three ChatGPT, Claude, and Gemini screenshots; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). The description below matches the submitted listing. The newer update and artwork are not yet confirmed public.
 
 ## Name
 
@@ -34,6 +34,7 @@ Threadlane is an independent extension and is not affiliated with or endorsed by
 - Language: English.
 - Visibility: **Public**, as authorized by the user. Complete the gates in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 - Publisher/support contact: **threadlane.support@gmail.com**.
+- Store icon: `assets/icons/128.png`, derived from the [supplied flame artwork](../assets/icons/README.md); matching promotional tile: `store/assets/promo-small.png`.
 - Privacy policy URL: [https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf). Hosted policy was checked live; packaged `privacy.html` is the offline copy.
 - Support email: [threadlane.support@gmail.com](mailto:threadlane.support@gmail.com). A separate homepage/support website is optional and has not been provided.
 - Screenshot assets: use the ordered [ChatGPT, Claude, and Gemini demo images](assets/screenshots/README.md), each a 1280×800 JPEG showing a harmless herb conversation with two paused follow-ups. Their capture versions, provenance, and hashes are recorded alongside the files. Do not use private chat content or imply a feature that is absent.
