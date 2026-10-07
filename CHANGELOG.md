@@ -4,6 +4,12 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-10-07
+
+### Fixed
+
+- Exclude collapsed-message display decorations from plain-text ChatGPT prompts as well as rich-text prompts, so a long message can be confirmed without expanding or refreshing its bubble.
+
 ## [0.3.8] - 2026-10-07
 
 ### Fixed

@@ -274,6 +274,19 @@ function renderRichUser(bubble: HTMLElement, text: string): void {
   bubble.replaceChildren(root, decoration, more);
 }
 
+function renderCollapsedPlainUser(bubble: HTMLElement, text: string): void {
+  const doc = bubble.ownerDocument;
+  const target = doc.createElement("div"); target.setAttribute("data-search-result-target", "");
+  const wrapper = doc.createElement("div");
+  const root = doc.createElement("div");
+  root.className = "whitespace-pre-wrap"; root.setAttribute("dir", "auto"); root.textContent = text;
+  wrapper.append(root); target.append(wrapper);
+  const decoration = doc.createElement("span");
+  decoration.setAttribute("aria-hidden", "true"); decoration.className = "block"; decoration.textContent = "…";
+  const more = doc.createElement("button"); more.textContent = "Show more";
+  bubble.replaceChildren(target, decoration, more);
+}
+
 describe("Persistent message queue UI", () => {
   test("a canceled queued click permits the model extension's delayed replay exactly once", async () => {
     const tab = await createTab();
@@ -1313,6 +1326,65 @@ describe("Persistent message queue UI", () => {
       static override now(): number { return Date.now() + 16_000; }
     }, configurable: true });
     await waitFor(() => !tab.queue.dispatching, "unproven rich send moves to review", 600);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("review");
+    expect(clicks).toBe(1);
+    expect(tab.requests.filter(request => request.action === "ack")).toHaveLength(0);
+  });
+
+  test.each(["visible", "hidden"] as const)("Send now removes a collapsed plain prompt once in a %s tab and completion sends the next item", async visibility => {
+    const tab = await createTab({ visibility });
+    const text = "Harmless plain transcript:\n    Keep  indentation.\n\n" + "Result line, preserving exact punctuation.\n".repeat(32) + "Literal final ellipsis …";
+    const first = await enqueue(tab, text);
+    const secondText = "Follow up after the collapsed prompt response completes.";
+    const second = await enqueue(tab, secondText);
+    const native = simulateNativeChat(tab, renderCollapsedPlainUser);
+    button(tab, "steer", first).click();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "collapsed plain user acknowledgement", 500);
+    expect(native.stops).toBe(1);
+    expect(native.sent).toEqual([text]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[first, "waiting"], [second, "queued"]]);
+    expect(tab.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+    expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "ack").map(request => request.id)).toEqual([first]);
+    await poll(tab);
+    expect(native.sent).toEqual([text]);
+    native.finish();
+    await waitFor(() => native.sent.length === 2 && !tab.queue.dispatching, "auto next after collapsed prompt completion", 500);
+    expect(native.sent).toEqual([text, secondText]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[second, "waiting"]]);
+    expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(0);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([first, second]);
+    expect(tab.requests.filter(request => request.action === "ack").map(request => request.id)).toEqual([first, second]);
+    native.finish();
+    await waitFor(() => tab.queue.state?.items.length === 0, "final collapsed prompt retires");
+    expect(native.sent).toHaveLength(2);
+  });
+
+  test.each(["changed content", "old ID"] as const)("a collapsed plain user bubble with %s cannot acknowledge a Send now attempt", async mismatch => {
+    const tab = await createTab();
+    const text = "Literal  spacing.\n\nA submitted trailing ellipsis …";
+    const id = await enqueue(tab, text);
+    if (mismatch === "old ID") renderCollapsedPlainUser(tab.doc.querySelector("[data-user-message-bubble]")!, text);
+    let clicks = 0;
+    tab.action.addEventListener("click", () => {
+      if (tab.action.getAttribute("aria-label")?.startsWith("Stop")) { busy(tab, false); return; }
+      clicks++;
+      if (mismatch !== "old ID") {
+        postUserBubble(tab, "");
+        renderCollapsedPlainUser(tab.doc.querySelector("main")!.lastElementChild!.firstElementChild as HTMLElement, text.replace("Literal  spacing", "Literal spacing"));
+      }
+      draft(tab, ""); busy(tab, true);
+    });
+    button(tab, "steer", id).click();
+    await waitFor(() => clicks === 1, "single collapsed attempted send");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    expect(tab.requests.filter(request => request.action === "ack")).toHaveLength(0);
+    expect(tab.shadow.querySelector(`li[data-id='${id}']`)).not.toBeNull();
+    Object.defineProperty(tab.dom, "Date", { value: class extends Date {
+      static override now(): number { return Date.now() + 16_000; }
+    }, configurable: true });
+    await waitFor(() => !tab.queue.dispatching, "unproven collapsed send moves to review", 600);
     expect((await persisted()).items.find(item => item.id === id)?.status).toBe("review");
     expect(clicks).toBe(1);
     expect(tab.requests.filter(request => request.action === "ack")).toHaveLength(0);

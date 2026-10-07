@@ -264,13 +264,16 @@ function normalizeText(text: string): string {
 }
 
 function userMessageText(element: HTMLElement): string {
+  // Collapse and copy decorations appear in both rich and plain user bubbles.
+  // Remove them from the cloned body before selecting either text format;
+  // a literal ellipsis in the submitted text remains untouched.
+  element.querySelectorAll("[aria-hidden='true'], [data-markdown-copy='exclude'], [hidden]").forEach(node => node.remove());
   const selector = "[data-markdown-text-tone='user-message']";
   const rich = element.matches(selector) ? element : element.querySelector<HTMLElement>(selector);
   if (!rich) return plainText(element);
   // Current rich user bubbles represent blank lines as adjacent paragraphs,
   // and single newlines as <br>s inside each paragraph. Read only their text
   // root: collapse affordances outside it are not part of the submitted text.
-  rich.querySelectorAll("[aria-hidden='true'], [data-markdown-copy='exclude'], [hidden]").forEach(node => node.remove());
   const nodes = Array.from(rich.childNodes);
   const paragraphs = nodes.filter((node): node is HTMLElement => node instanceof HTMLElement && node.tagName === "P");
   if (paragraphs.length && nodes.every(node =>
