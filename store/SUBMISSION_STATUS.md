@@ -1,8 +1,8 @@
 # Chrome Web Store submission status
 
-Latest update verified in the Threadlane publisher dashboard on **2026-10-07 at 12:35:57.226 UTC**.
+Latest update verified in the Threadlane publisher dashboard on **2026-10-07 at 13:00:04.533 UTC**.
 
-**Update 0.3.10 is pending review**, store revision `00004`, on the existing public item. Automatic publication after approval is enabled. Pending review is not approval or availability of the update.
+**Update 0.3.10 is pending review**, store revision `00005`, on the existing public item. Automatic publication after approval is enabled. Matching Claude and Gemini screenshots now accompany the original ChatGPT screenshot in the submitted listing. Pending review is not approval or availability of the update or new screenshots.
 
 **Version 0.3.6 is published and publicly available.** The listing shows version 0.3.6, an Updated date of October 7, 2026, and Add to Chrome. [Install Threadlane](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
@@ -14,11 +14,11 @@ Public-listing evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
-- Store revision: `00004`.
+- Store revision: `00005`.
 - Update status: **Pending review**; published version remains **0.3.6**.
 - Distribution: Public, all regions, free of charge.
 - Automatic publication after approval: enabled.
-- Confirmation: **2026-10-07 at 12:35:57.226 UTC**.
+- Confirmation: **2026-10-07 at 13:00:04.533 UTC**.
 
 Submitted package: `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/work/queue-hover-highlight/.local/release/0.3.10/threadlane-0.3.10.zip`.
 
@@ -26,7 +26,11 @@ SHA-256: `f4655b32987f0467d99cbece042143b0b262e87e0057e9db4e5a7fa722276dfe`.
 
 The exact archive passed production release validation. Relative to the verified 0.3.9 package, only the manifest version and the queue UI hover rule differ; all remaining production files are identical. Firefox signing, its public submission, and its update feed were not changed by this Chrome upload.
 
-Evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/chrome-web-store-0.3.10/`: `submission.json`, `pending-package-ax.txt`, `pending-status-ax.txt`, `pending-package-0.3.10.png`, `pending-0.3.10.png`, and `submitted-success.png`. The dashboard displayed the submitted version and revision as well as the published 0.3.6 version.
+The initial 0.3.10 submission was confirmed at **12:35:57.226 UTC** as revision `00004`. To add the requested provider screenshots, that pending review was canceled, the listing was saved with three images, and the same package was successfully resubmitted. Revision `00005` was then confirmed pending review, with the existing published 0.3.6 still available. No runtime package changes or new permissions were introduced by the screenshot update.
+
+The ordered images, capture provenance, dimensions, and hashes are committed under [assets/screenshots](assets/screenshots/README.md). New Claude and Gemini captures show real, isolated herb conversations with the same paused basil and thyme follow-ups as the original ChatGPT image. They were captured on installed development runtime 0.3.9 while 0.3.10 activation was deferred to protect other-tab activity; this is a listing asset change, not new runtime qualification.
+
+Evidence for the renewed submission is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/provider-demos-2026-10-07/`: `submission.json`, `submitted-success.jpg`, `pending-listing-ax.txt`, `pending-three-screenshot-gallery.jpg`, `pending-package-ax.txt`, `pending-package-0.3.10.jpg`, and `pending-status-ax.txt`. The gallery showed Screenshot 1, Screenshot 2, and Screenshot 3; the package page showed draft version 0.3.10, revision 00005, and published version 0.3.6. Initial revision 00004 evidence remains in `outputs/chrome-web-store-0.3.10/` in the originating workspace.
 
 ## Separate unlisted beta
 
