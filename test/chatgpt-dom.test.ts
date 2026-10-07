@@ -247,6 +247,35 @@ describe("queue DOM adapter", () => {
     expect(getVisibleUserMessages()).toEqual([{ id: "11111111-1111-4111-8111-111111111111", text: "First line.\nSecond line." }]);
   });
 
+  test("reads a collapsed plain user bubble without its hidden ellipsis", () => {
+    document.querySelector("main")!.innerHTML = '<article data-chatgpt-search-unit-key="22222222-2222-4222-8222-222222222222:user" data-chatgpt-search-message-ids="22222222-2222-4222-8222-222222222222"><div data-user-message-bubble="true"><div data-search-result-target><div><div class="whitespace-pre-wrap" dir="auto">First line.\n    Indented line.\n\nLast paragraph.</div></div></div><span aria-hidden="true" class="block">…</span><button>Show more</button></div></article>';
+    expect(getVisibleUserMessages()).toEqual([{
+      id: "22222222-2222-4222-8222-222222222222",
+      text: "First line.\n    Indented line.\n\nLast paragraph.",
+    }]);
+    // Reading a cloned bubble must leave the site's collapsed control intact.
+    expect(document.querySelector("[aria-hidden='true']")?.textContent).toBe("…");
+  });
+
+  test("reads an expanded plain user bubble without changing its whitespace", () => {
+    document.querySelector("main")!.innerHTML = '<article data-message-author-role="user" data-message-id="expanded"><div data-user-message-bubble="true"><div class="whitespace-pre-wrap" dir="auto">First  line.\n    Indented line.\n\nLast paragraph.</div><button>Show less</button></div></article>';
+    expect(getVisibleUserMessages()).toEqual([{ id: "expanded", text: "First  line.\n    Indented line.\n\nLast paragraph." }]);
+  });
+
+  test("preserves a literal trailing ellipsis in collapsed plain user text", () => {
+    document.querySelector("main")!.innerHTML = '<article data-message-author-role="user" data-message-id="literal-ellipsis"><div data-user-message-bubble="true"><div class="whitespace-pre-wrap">This submitted sentence ends with …</div><span aria-hidden="true" class="block">…</span><button>Show more</button></div></article>';
+    expect(getVisibleUserMessages()).toEqual([{ id: "literal-ellipsis", text: "This submitted sentence ends with …" }]);
+  });
+
+  test("removes nested copy exclusions from plain user text only", () => {
+    document.querySelector("main")!.innerHTML = '<article data-message-author-role="user" data-message-id="plain-exclusions"><div data-user-message-bubble="true"><div class="whitespace-pre-wrap">First<span aria-hidden="true"><span>Hidden accessibility decoration</span></span>  line.<span data-markdown-copy="exclude"><span>Copy decoration</span></span><br><span hidden><span>Collapsed control</span></span>    Indented line.<button><span>Nested button</span></button><span role="button">Nested action</span><br>Last …</div></div></article><article data-message-author-role="assistant" data-message-id="assistant-exclusions"><div data-markdown-text-style="assistant-message">Answer<span aria-hidden="true"> decoration</span></div></article>';
+    expect(getVisibleUserMessages()).toEqual([{ id: "plain-exclusions", text: "First  line.\n    Indented line.\nLast …" }]);
+    const composer = findQueueComposer()!;
+    composer.innerHTML = '<p>Composer<span aria-hidden="true"> literal content</span></p>';
+    expect(readComposer(composer)).toBe("Composer literal content");
+    expect(document.querySelector("[data-message-id='assistant-exclusions']")?.textContent).toBe("Answer decoration");
+  });
+
   test("reads rich user paragraphs as blank lines while retaining inline breaks and indentation", () => {
     document.querySelector("main")!.innerHTML = '<article data-chatgpt-search-unit-key="22222222-2222-4222-8222-222222222222:user" data-chatgpt-search-message-ids="22222222-2222-4222-8222-222222222222"><div data-user-message-bubble="true"><div data-markdown-text-tone="user-message"><p><span>First paragraph.</span><br><span>    Indented second line.</span></p><p><span>Second paragraph.</span></p><p><span>Third paragraph.</span><br><span>Another line.</span></p><p><span>Fourth paragraph.</span></p><p><span>Fifth paragraph.</span></p><p><span>Sixth paragraph.</span></p></div><span aria-hidden="true" class="block">t</span><button>Show more</button></div></article>';
     expect(getVisibleUserMessages()).toEqual([{
