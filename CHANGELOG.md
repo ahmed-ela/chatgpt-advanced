@@ -4,6 +4,12 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-10-07
+
+### Fixed
+
+- Confirm queued ChatGPT messages rendered as rich text by preserving paragraph blank lines and excluding display-only decorations. Confirmed messages leave the queue without retrying the native send.
+
 ## [0.3.7] - 2026-10-06
 
 ### Fixed
