@@ -187,7 +187,7 @@ async function savedReview(text: string, paused = false): Promise<string> {
   return id;
 }
 
-function simulateNativeChat(tab: Tab): { sent: string[]; stops: number; finish: () => void } {
+function simulateNativeChat(tab: Tab, renderUser?: (bubble: HTMLElement, text: string) => void): { sent: string[]; stops: number; finish: () => void } {
   const result = { sent: [] as string[], stops: 0, finish: () => {} };
   let pendingAnswer: HTMLElement | null = null;
   result.finish = () => {
@@ -200,13 +200,17 @@ function simulateNativeChat(tab: Tab): { sent: string[]; stops: number; finish: 
   };
   tab.action.addEventListener("click", () => {
     if (tab.action.getAttribute("aria-label")?.startsWith("Stop")) { result.stops++; result.finish(); return; }
-    result.sent.push(tab.composer.innerText);
+    // HappyDOM's innerText removes a literal first newline from a text node.
+    // The rich fixture captures the editor's submitted text, not that emulation.
+    const text = renderUser ? tab.composer.textContent ?? "" : tab.composer.innerText;
+    result.sent.push(text);
     const id = crypto.randomUUID();
     const user = tab.doc.createElement("article");
     user.setAttribute("data-chatgpt-search-unit-key", `${id}:user`);
     user.setAttribute("data-chatgpt-search-message-ids", id);
     user.innerHTML = '<div data-user-message-bubble="true"></div>';
-    user.firstElementChild!.textContent = tab.composer.innerText;
+    if (renderUser) renderUser(user.firstElementChild as HTMLElement, text);
+    else user.firstElementChild!.textContent = text;
     pendingAnswer = tab.doc.createElement("article");
     pendingAnswer.innerHTML = '<div data-markdown-text-style="assistant-message">Response running</div>';
     tab.doc.querySelector("main")!.append(user, pendingAnswer);
@@ -250,6 +254,24 @@ function postUserBubble(tab: Tab, text: string): void {
   bubble.setAttribute("data-user-message-bubble", "");
   bubble.textContent = text;
   article.append(bubble); tab.doc.querySelector("main")!.append(article);
+}
+
+function renderRichUser(bubble: HTMLElement, text: string): void {
+  const doc = bubble.ownerDocument;
+  const root = doc.createElement("div");
+  root.setAttribute("data-markdown-text-tone", "user-message");
+  for (const paragraph of text.split("\n\n")) {
+    const p = doc.createElement("p");
+    paragraph.split("\n").forEach((line, index) => {
+      if (index) p.append(doc.createElement("br"));
+      const span = doc.createElement("span"); span.textContent = line; p.append(span);
+    });
+    root.append(p);
+  }
+  const decoration = doc.createElement("span");
+  decoration.setAttribute("aria-hidden", "true"); decoration.textContent = "t";
+  const more = doc.createElement("button"); more.textContent = "Show more";
+  bubble.replaceChildren(root, decoration, more);
 }
 
 describe("Persistent message queue UI", () => {
@@ -1232,6 +1254,68 @@ describe("Persistent message queue UI", () => {
     expect((await persisted()).items.map(item => item.id)).toEqual([second]);
     await poll(tab);
     expect(native.sent).toHaveLength(2);
+  });
+
+  test.each(["visible", "hidden"] as const)("Send now removes a rich multiline prompt once in a %s tab and completion sends the next item", async visibility => {
+    const tab = await createTab({ visibility });
+    const text = "Harmless multiline transcript:\n    Keep indentation.\n\nFirst result.\n\nSecond result.\nA continuation.\n\nThird result.\n\nFourth result.\n\nLast paragraph.";
+    const first = await enqueue(tab, text);
+    const secondText = "Follow up once the response completes.";
+    const second = await enqueue(tab, secondText);
+    const native = simulateNativeChat(tab, renderRichUser);
+    button(tab, "steer", first).click();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "rich user acknowledgement", 500);
+    expect(native.stops).toBe(1);
+    expect(native.sent).toEqual([text]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[first, "waiting"], [second, "queued"]]);
+    expect(tab.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+    expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(1);
+    expect(tab.requests.filter(request => request.action === "ack").map(request => request.id)).toEqual([first]);
+    await poll(tab);
+    expect(native.sent).toEqual([text]);
+    native.finish();
+    await waitFor(() => native.sent.length === 2 && !tab.queue.dispatching, "auto next after rich prompt completion", 500);
+    expect(native.sent).toEqual([text, secondText]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[second, "waiting"]]);
+    expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(0);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([first, second]);
+    expect(tab.requests.filter(request => request.action === "ack").map(request => request.id)).toEqual([first, second]);
+    native.finish();
+    await waitFor(() => tab.queue.state?.items.length === 0, "final rich prompt retires");
+    expect(native.sent).toHaveLength(2);
+  });
+
+  test.each(["changed spacing", "changed blank line", "old ID"] as const)("a rich user bubble with %s cannot acknowledge a Send now attempt", async mismatch => {
+    const tab = await createTab();
+    const text = "Literal  spacing.\n\nSecond paragraph.";
+    const id = await enqueue(tab, text);
+    if (mismatch === "old ID") renderRichUser(tab.doc.querySelector("[data-user-message-bubble]")!, text);
+    let clicks = 0;
+    tab.action.addEventListener("click", () => {
+      if (tab.action.getAttribute("aria-label")?.startsWith("Stop")) { busy(tab, false); return; }
+      clicks++;
+      if (mismatch !== "old ID") {
+        postUserBubble(tab, "");
+        const postedText = mismatch === "changed spacing"
+          ? text.replace("Literal  spacing", "Literal spacing")
+          : text.replace("\n\n", "\n");
+        renderRichUser(tab.doc.querySelector("main")!.lastElementChild!.firstElementChild as HTMLElement, postedText);
+      }
+      draft(tab, ""); busy(tab, true);
+    });
+    button(tab, "steer", id).click();
+    await waitFor(() => clicks === 1, "single attempted send");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("sending");
+    expect(tab.requests.filter(request => request.action === "ack")).toHaveLength(0);
+    expect(tab.shadow.querySelector(`li[data-id='${id}']`)).not.toBeNull();
+    Object.defineProperty(tab.dom, "Date", { value: class extends Date {
+      static override now(): number { return Date.now() + 16_000; }
+    }, configurable: true });
+    await waitFor(() => !tab.queue.dispatching, "unproven rich send moves to review", 600);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("review");
+    expect(clicks).toBe(1);
+    expect(tab.requests.filter(request => request.action === "ack")).toHaveLength(0);
   });
 
   test("Send now cannot interrupt another tab's reserved edit", async () => {

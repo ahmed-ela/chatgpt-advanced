@@ -247,6 +247,30 @@ describe("queue DOM adapter", () => {
     expect(getVisibleUserMessages()).toEqual([{ id: "11111111-1111-4111-8111-111111111111", text: "First line.\nSecond line." }]);
   });
 
+  test("reads rich user paragraphs as blank lines while retaining inline breaks and indentation", () => {
+    document.querySelector("main")!.innerHTML = '<article data-chatgpt-search-unit-key="22222222-2222-4222-8222-222222222222:user" data-chatgpt-search-message-ids="22222222-2222-4222-8222-222222222222"><div data-user-message-bubble="true"><div data-markdown-text-tone="user-message"><p><span>First paragraph.</span><br><span>    Indented second line.</span></p><p><span>Second paragraph.</span></p><p><span>Third paragraph.</span><br><span>Another line.</span></p><p><span>Fourth paragraph.</span></p><p><span>Fifth paragraph.</span></p><p><span>Sixth paragraph.</span></p></div><span aria-hidden="true" class="block">t</span><button>Show more</button></div></article>';
+    expect(getVisibleUserMessages()).toEqual([{
+      id: "22222222-2222-4222-8222-222222222222",
+      text: "First paragraph.\n    Indented second line.\n\nSecond paragraph.\n\nThird paragraph.\nAnother line.\n\nFourth paragraph.\n\nFifth paragraph.\n\nSixth paragraph.",
+    }]);
+  });
+
+  test("excludes rich user copy decorations without changing legacy paragraph or composer boundaries", () => {
+    document.querySelector("main")!.innerHTML = '<article data-message-author-role="user" data-message-id="rich"><div data-markdown-text-tone="user-message"><p><span>Literal  spacing</span><span aria-hidden="true">Hidden</span><span data-markdown-copy="exclude">Decoration</span><br><span>next line</span></p><p><span>Last paragraph</span></p></div><span aria-hidden="true">t</span><button>Show more</button></article><article data-message-author-role="user" data-message-id="legacy"><p>First legacy line</p><p>Second legacy line</p></article>';
+    expect(getVisibleUserMessages()).toEqual([
+      { id: "rich", text: "Literal  spacing\nnext line\n\nLast paragraph" },
+      { id: "legacy", text: "First legacy line\nSecond legacy line" },
+    ]);
+    const composer = findQueueComposer()!;
+    composer.innerHTML = '<p>First composer line</p><p>Second composer line</p>';
+    expect(readComposer(composer)).toBe("First composer line\nSecond composer line");
+  });
+
+  test("preserves empty rich user paragraphs rather than collapsing consecutive blank lines", () => {
+    document.querySelector("main")!.innerHTML = '<article data-message-author-role="user" data-message-id="empty-paragraph"><div data-markdown-text-tone="user-message"><p>First paragraph.</p><p></p><p>Last paragraph.</p></div></article>';
+    expect(getVisibleUserMessages()).toEqual([{ id: "empty-paragraph", text: "First paragraph.\n\n\n\nLast paragraph." }]);
+  });
+
   test("requires exact user, later assistant and completion toolbar", () => {
     expect(getAssistantCompletionAfter("user-1")).toBe(true);
     expect(getAssistantCompletionAfter("missing-user")).toBe(false);

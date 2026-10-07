@@ -263,6 +263,22 @@ function normalizeText(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trim();
 }
 
+function userMessageText(element: HTMLElement): string {
+  const selector = "[data-markdown-text-tone='user-message']";
+  const rich = element.matches(selector) ? element : element.querySelector<HTMLElement>(selector);
+  if (!rich) return plainText(element);
+  // Current rich user bubbles represent blank lines as adjacent paragraphs,
+  // and single newlines as <br>s inside each paragraph. Read only their text
+  // root: collapse affordances outside it are not part of the submitted text.
+  rich.querySelectorAll("[aria-hidden='true'], [data-markdown-copy='exclude'], [hidden]").forEach(node => node.remove());
+  const nodes = Array.from(rich.childNodes);
+  const paragraphs = nodes.filter((node): node is HTMLElement => node instanceof HTMLElement && node.tagName === "P");
+  if (paragraphs.length && nodes.every(node =>
+    (node instanceof HTMLElement && node.tagName === "P") || (node.nodeType === 3 && !node.textContent?.trim()),
+  )) return paragraphs.map(paragraph => plainText(paragraph)).join("\n\n");
+  return plainText(rich);
+}
+
 function visibleMessages(roleFilter?: MessageRecord["role"]): MessageRecord[] {
   if (currentProvider() !== "chatgpt") return providerMessages(isVisible, plainText, roleFilter);
   const records: MessageRecord[] = [];
@@ -282,7 +298,7 @@ function visibleMessages(roleFilter?: MessageRecord["role"]): MessageRecord[] {
     ) ?? element;
     const copy = body.cloneNode(true) as HTMLElement;
     copy.querySelectorAll("button, [role='button'], script, style").forEach((node) => node.remove());
-    const text = normalizeText(plainText(copy));
+    const text = normalizeText(role === "user" ? userMessageText(copy) : plainText(copy));
     if (!text) continue;
     seen.add(id);
     records.push({ id, text, role, element });
