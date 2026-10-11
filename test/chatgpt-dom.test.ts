@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, registerNewConversationAlias, clearConversationAlias } from "../src/chatgpt-dom";
+import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias, type ConversationAlias } from "../src/chatgpt-dom";
 
 let dom: Window;
 let document: Document;
@@ -601,6 +601,7 @@ describe("queue DOM adapter", () => {
       const route = `bbbbbbbb-bbbb-4bbb-8bbb-${suffix}`;
       dom.happyDOM.setURL(`https://chatgpt.com/c/${route}`);
       for (const marker of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.setAttribute("data-chatgpt-selection-conversation-id", `local-chatgpt:cccccccc-cccc-4ccc-8ccc-${suffix}`);
+      document.querySelector("[data-chatgpt-search-unit-key='one:user'] [data-chatgpt-selection-message-id]")!.setAttribute("data-chatgpt-selection-message-id", `11111111-1111-4111-8111-${suffix}`);
       expect(registerNewConversationAlias(`chatgpt:${route}`, "First question.")).toBe(true);
     }
     clearConversationAlias(true);
@@ -613,6 +614,7 @@ describe("queue DOM adapter", () => {
     localConversation();
     expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
     expect(isCurrentConversationReady()).toBe(true);
+    const witness = getVerifiedConversationAlias()!;
     const previousDom = dom;
     dom = new Window({ url: `https://chatgpt.com/c/${id}` });
     document = dom.document as unknown as Document;
@@ -621,7 +623,70 @@ describe("queue DOM adapter", () => {
     layout(); localConversation();
     expect(isCurrentConversationReady()).toBe(false);
     expect(getCurrentConversationReadiness()).toBe("identity-unverified");
+    expect(getVerifiedConversationAlias()).toBeNull();
+    expect(restoreConversationAlias(witness)).toBe(true);
+    expect(isCurrentConversationReady()).toBe(true);
+    expect(getAssistantCompletionAfter(witness.firstUserId)).toBe(true);
     await previousDom.happyDOM.close();
+  });
+
+  test("a witnessed identity persists during a busy first reply without authorizing delivery", () => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    const witness = getVerifiedConversationAlias()!;
+    document.querySelector("main")!.setAttribute("aria-busy", "true");
+    expect(getVerifiedConversationAlias()).toEqual(witness);
+    clearConversationAlias();
+    expect(restoreConversationAlias(witness)).toBe(true);
+    expect(getCurrentConversationReadiness()).toBe("loading");
+    expect(getAssistantCompletionAfter(witness.firstUserId)).toBe(false);
+    document.querySelector("main")!.removeAttribute("aria-busy");
+    expect(isCurrentConversationReady()).toBe(true);
+    document.querySelector("[data-testid='copy-turn-action-button']")!.remove();
+    expect(getAssistantCompletionAfter(witness.firstUserId)).toBe(false);
+  });
+
+  test.each(["route", "local", "first-user", "mixed", "missing", "hidden-first-user"])("durable identity restoration rejects a changed %s", change => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    const witness = getVerifiedConversationAlias()!;
+    clearConversationAlias();
+    if (change === "route") dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    if (change === "local") for (const marker of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    if (change === "first-user") document.querySelector("[data-chatgpt-selection-message-id='11111111-1111-4111-8111-111111111111']")!.setAttribute("data-chatgpt-selection-message-id", "22222222-2222-4222-8222-222222222222");
+    if (change === "mixed") document.querySelector("[data-chatgpt-selection-conversation-id]")!.setAttribute("data-chatgpt-selection-conversation-id", id);
+    if (change === "missing") for (const marker of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.removeAttribute("data-chatgpt-selection-conversation-id");
+    if (change === "hidden-first-user") document.querySelector<HTMLElement>("[data-chatgpt-search-unit-key='one:user']")!.hidden = true;
+    expect(restoreConversationAlias(witness)).toBe(false);
+    expect(getVerifiedConversationAlias()).toBeNull();
+    expect(isCurrentConversationReady()).toBe(false);
+  });
+
+  test("restoration rejects malformed witnesses and returns detached copies of valid ones", () => {
+    localConversation();
+    const witness: ConversationAlias = { routeKey: `chatgpt:${id}`, localId: "local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc", firstUserId: "11111111-1111-4111-8111-111111111111" };
+    for (const bad of [null, [], {}, { ...witness, routeKey: `claude:${id}` }, { ...witness, localId: "local-chatgpt:invalid" }, { ...witness, firstUserId: "invalid" }]) {
+      expect(restoreConversationAlias(bad as ConversationAlias)).toBe(false);
+    }
+    expect(restoreConversationAlias(witness)).toBe(true);
+    const copy = getVerifiedConversationAlias()!;
+    copy.firstUserId = "invalid";
+    expect(getVerifiedConversationAlias()).toEqual(witness);
+    document.querySelector("[data-chatgpt-selection-conversation-id]")!.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    expect(getVerifiedConversationAlias()).toBeNull();
+  });
+
+  test("restoring a stored witness cannot reuse a witnessed local identity or first user in another route", () => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    const witness = getVerifiedConversationAlias()!;
+    clearConversationAlias(true);
+    const routeKey = "chatgpt:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    dom.happyDOM.setURL(`https://chatgpt.com/c/${routeKey.slice("chatgpt:".length)}`);
+    expect(restoreConversationAlias({ ...witness, routeKey })).toBe(false);
+    for (const marker of Array.from(document.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    expect(restoreConversationAlias({ ...witness, routeKey, localId: "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd" })).toBe(false);
+    expect(isCurrentConversationReady()).toBe(false);
   });
 
   test("new-chat local IDs require an explicit first-send binding and survive only their matching route", () => {

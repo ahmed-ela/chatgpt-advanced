@@ -4,6 +4,14 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-10-11
+
+### Fixed
+
+- Observe first-send identity changes while ChatGPT is busy, so background timer throttling cannot expire an otherwise valid conversation witness before the queue starts.
+- Persist witnessed ChatGPT temporary conversation IDs in encrypted queue storage and restore only exact route, local ID, and first-message matches after content-script restarts or navigation.
+- Explain an unverified conversation ID accurately when Send now is blocked, instead of describing a completed conversation as still loading.
+
 ## [0.3.11] - 2026-10-07
 
 ### Changed

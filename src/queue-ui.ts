@@ -6,7 +6,8 @@ import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages,
   getAssistantCompletionAfter, getStableUserMessageAnchor, isCurrentConversationReady, getCurrentConversationReadiness,
-  registerNewConversationAlias, clearConversationAlias, isEmptyNewChat, composerScope, getProviderName,
+  registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias,
+  isEmptyNewChat, composerScope, getProviderName,
 } from "./chatgpt-dom";
 
 type QueueRuntime = Pick<ExtensionRuntime, "sendMessage" | "onMessage">;
@@ -53,6 +54,7 @@ export class MessageQueue {
   private pointerDrag: { id: string; pointerId: number; x: number; y: number; handle: HTMLElement; toId?: string } | null = null;
   private pendingSave: { id: string; key: string; text: string } | null = null;
   private firstSend: { text: string; expiresAt: number; key?: string } | null = null;
+  private identitySource: "native-first-send" | "persisted" | null = null;
   private pollTimer = 0;
   private lastPoll = 0;
   private retryAfter = 0;
@@ -213,12 +215,23 @@ export class MessageQueue {
       if (records.every(record => record.target === this.host || this.host.contains(record.target))) return;
       this.nativeReplay.check();
       for (const wake of this.domWaiters) wake();
+      // The saved route/local identity can arrive while the first response is
+      // busy and before any queue exists. Capture that witness from mutations;
+      // background timer throttling must not make it expire unobserved.
+      if (this.firstSend) {
+        const previousKey = this.key;
+        this.syncRoute();
+        // Streamed text can change continuously before identity is available.
+        // Only a route transition or resolved witness needs a durable read;
+        // ordinary completion processing below still wakes an existing queue.
+        if (this.key !== previousKey || !this.firstSend) this.scheduleTick();
+      }
       if (!this.state?.items.length || this.dispatching || this.saving || isChatBusy()) return;
       this.scheduleTick();
     });
     this.observer.observe(document.body, {
       childList: true, characterData: true, subtree: true, attributes: true,
-      attributeFilter: ["aria-label", "title", "disabled", "aria-disabled", "hidden", "aria-hidden", "class", "data-testid", "data-is-streaming", "data-perf-row-streaming", "aria-busy", "data-status"],
+      attributeFilter: ["aria-label", "title", "disabled", "aria-disabled", "hidden", "aria-hidden", "class", "data-testid", "data-is-streaming", "data-perf-row-streaming", "aria-busy", "data-status", "data-chatgpt-selection-conversation-id", "data-chatgpt-selection-message-id", "data-chatgpt-search-message-ids"],
     });
     this.pollTimer = window.setInterval(() => { void this.tick(); }, POLL_MS);
     void this.tick();
@@ -286,15 +299,38 @@ export class MessageQueue {
       clearConversationAlias(true);
       if (!this.key && key?.startsWith("chatgpt:") && this.firstSend && !this.firstSend.key && Date.now() < this.firstSend.expiresAt) {
         this.firstSend.key = key;
+        this.host.dataset.queueIdentityWitness = "route-bound";
       } else this.firstSend = null;
       this.key = key; this.state = null; this.editing = null; this.editToken = null; this.error = "";
+      this.identitySource = null;
       this.temporaryAnchors.clear();
       this.editRevision++; this.retryAfter = 0;
       this.pendingSave = null; this.signature = "";
     }
-    if (this.firstSend && !this.firstSend.key && Date.now() >= this.firstSend.expiresAt) this.firstSend = null;
-    if (key && this.firstSend?.key === key && registerNewConversationAlias(key, this.firstSend.text)) this.firstSend = null;
+    if (this.firstSend && !this.firstSend.key && Date.now() >= this.firstSend.expiresAt) {
+      this.firstSend = null; this.host.dataset.queueIdentityWitness = "expired";
+    }
+    if (key && this.firstSend?.key === key && registerNewConversationAlias(key, this.firstSend.text)) {
+      this.firstSend = null; this.identitySource = "native-first-send";
+      this.host.dataset.queueIdentityWitness = "verified";
+    }
     return key;
+  }
+
+  private async syncConversationIdentity(key: string): Promise<void> {
+    if (key !== this.key || key !== getQueueKey(location.href)) return;
+    if (!getVerifiedConversationAlias()) {
+      for (const alias of this.state?.conversationAliases ?? []) {
+        if (restoreConversationAlias(alias)) { this.identitySource = "persisted"; break; }
+      }
+    }
+    const alias = getVerifiedConversationAlias();
+    if (!alias || alias.routeKey !== key || this.state?.conversationAliases?.some(saved =>
+      saved.routeKey === alias.routeKey && saved.localId === alias.localId && saved.firstUserId === alias.firstUserId)) return;
+    // Persist only a native-send witness, never infer a binding from the URL,
+    // queued text, or completion anchor. The encrypted worker record survives
+    // content-script and service-worker restarts.
+    await this.request("bind-conversation", { conversationAlias: alias }, key);
   }
 
   private captureFirstSend(): void {
@@ -303,7 +339,10 @@ export class MessageQueue {
     if (!isEmptyNewChat()) return;
     const composer = findQueueComposer();
     const text = composer && readComposer(composer);
-    if (text?.trim() && !hasComposerAttachments()) this.firstSend = { text, expiresAt: Date.now() + 120000 };
+    if (text?.trim() && !hasComposerAttachments()) {
+      this.firstSend = { text, expiresAt: Date.now() + 120000 };
+      this.host.dataset.queueIdentityWitness = "captured";
+    }
   }
 
   private async request(action: string, extra: Record<string, unknown> = {}, key = this.key): Promise<{ state: QueueState; claimed?: QueueItem }> {
@@ -332,11 +371,21 @@ export class MessageQueue {
       const key = this.syncRoute();
       editRevision = this.editRevision;
       if (!key) { this.render(); return; }
-      const busy = isChatBusy();
+      await this.syncConversationIdentity(key);
+      if (key !== this.syncRoute() || this.abort.signal.aborted) return;
+      let busy = isChatBusy();
       // Release this tab's busy lease promptly; other tabs' busy evidence still
       // blocks claims until they report idle or expire.
       await this.request("heartbeat", { busy });
       if (key !== this.syncRoute() || editRevision !== this.editRevision || this.editingBusy) return;
+      await this.syncConversationIdentity(key);
+      if (key !== this.syncRoute() || editRevision !== this.editRevision || this.editingBusy || this.abort.signal.aborted) return;
+      const restoredBusy = isChatBusy();
+      if (restoredBusy !== busy) {
+        busy = restoredBusy;
+        await this.request("heartbeat", { busy }, key);
+        if (key !== this.syncRoute() || editRevision !== this.editRevision || this.editingBusy) return;
+      }
       if (this.editing && this.editToken) {
         const edited = this.state?.items.find(item => item.id === this.editing);
         if (edited?.status === "editing" && edited.editToken === this.editToken) {
@@ -508,7 +557,10 @@ export class MessageQueue {
         this.error = SEND_DRAFT_WARNING; this.render(); return;
       }
       if (!isCurrentConversationReady()) {
-        this.error = "Wait for this conversation to finish loading before using Send now."; this.render(); return;
+        this.error = getCurrentConversationReadiness() === "identity-unverified"
+          ? "ChatGPT's temporary conversation ID is not linked to this saved chat. Reopen this conversation to reconnect the queue."
+          : "Wait for this conversation to finish loading before using Send now.";
+        this.render(); return;
       }
     }
     this.dispatching = true;
@@ -830,6 +882,8 @@ export class MessageQueue {
     this.host.dataset.queueHasAnchor = String(Boolean(this.state?.lastCompletedUserMessageId));
     this.host.dataset.queueWorkerBusy = String(workerBusy);
     this.host.dataset.queueVisibility = document.visibilityState;
+    this.host.dataset.queueIdentitySource = getVerifiedConversationAlias() ? this.identitySource ?? "native-first-send" :
+      getCurrentConversationReadiness() === "ready" ? "provider" : "unverified";
     const showAdd = Boolean(draft && (busy || allItems.length || this.state?.paused));
     const unknownAnchor = Boolean(this.state?.lastCompletedUserMessageId && !this.canUseAnchor(this.state.lastCompletedUserMessageId)) ||
       allItems.some(item => item.status === "waiting" && item.userMessageId && !this.canUseAnchor(item.userMessageId));
@@ -842,7 +896,7 @@ export class MessageQueue {
     const waiting = this.error || recovery || this.dispatching ? "" :
       hold === "draft" ? "Queue or clear your draft to continue." :
       hold === "attachments" ? "Send or remove your attachment to continue." :
-      hold === "identity-unverified" ? "Reload after the response finishes to reconnect the queue." :
+      hold === "identity-unverified" ? "ChatGPT's temporary conversation ID is not linked to this saved chat. Reopen this conversation to reconnect the queue." :
       !busy && (hold === "completion-pending" || hold === "waiting")
         ? `Waiting for ${getProviderName()} to confirm this response finished.` :
       hold === "transcript-loading" ? "Waiting for this conversation to finish loading." : "";

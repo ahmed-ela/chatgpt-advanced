@@ -1,4 +1,4 @@
-import { getQueueKey } from "./queue-store";
+import { getQueueKey, isValidConversationAlias } from "./queue-store";
 import { currentProvider, providerComposerSelectors, providerScopeSelector, providerAssistantElements,
   providerMessageId, providerMessages, providerLoading, providerConversationReady, providerCompletion } from "./provider-dom";
 
@@ -20,7 +20,7 @@ const MESSAGE_SELECTOR = `${USER_SELECTOR}, ${ASSISTANT_SELECTOR}`;
 const STOP_LABEL = /^(?:stop|pause)(?:$|[\s…])/i;
 const SEND_LABEL = /^(?:send|send message|send prompt)$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-interface ConversationAlias { routeKey: string; localId: string; firstUserId: string; }
+export interface ConversationAlias { routeKey: string; localId: string; firstUserId: string; }
 let conversationAlias: ConversationAlias | null = null;
 let aliasDocument: Document | null = null;
 const verifiedAliases = new Map<string, ConversationAlias>();
@@ -340,13 +340,40 @@ export function registerNewConversationAlias(routeKey: string, firstMessageText:
   const localId = markerIds[0];
   if (!localId?.startsWith("local-chatgpt:") || !UUID_PATTERN.test(localId.slice("local-chatgpt:".length)) ||
       markerIds.some((id) => id !== localId)) return false;
-  if (conversationAlias && (conversationAlias.localId !== localId || conversationAlias.firstUserId !== firstUser.id)) return false;
-  // A previously verified local transcript cannot acquire a different saved
-  // route just because navigation temporarily leaves its DOM mounted.
-  if (Array.from(verifiedAliases.values()).some(alias => alias.localId === localId && alias.routeKey !== routeKey)) return false;
-  conversationAlias = { routeKey, localId, firstUserId: firstUser.id };
-  verifiedAliases.delete(routeKey);
-  verifiedAliases.set(routeKey, conversationAlias);
+  return restoreConversationAlias({ routeKey, localId, firstUserId: firstUser.id });
+}
+
+function matchesVisibleConversationAlias(alias: ConversationAlias): boolean {
+  if (!isValidConversationAlias(alias) || getQueueKey(window.location.href) !== alias.routeKey || !findQueueComposer()) return false;
+  const markerIds = visibleConversationIds();
+  const firstUser = getVisibleUserMessages()[0];
+  return markerIds.length > 0 && markerIds.every(id => id === alias.localId) &&
+    firstUser?.id === alias.firstUserId;
+}
+
+/** Return an exact observed witness, including while its first answer is busy. */
+export function getVerifiedConversationAlias(): ConversationAlias | null {
+  ensureAliasDocument();
+  const key = getQueueKey(window.location.href);
+  const alias = key && (conversationAlias?.routeKey === key ? conversationAlias : verifiedAliases.get(key));
+  return alias && matchesVisibleConversationAlias(alias) ? { ...alias } : null;
+}
+
+/** Restore only a durable first-send witness; this does not authorize completion. */
+export function restoreConversationAlias(alias: ConversationAlias): boolean {
+  ensureAliasDocument();
+  if (!matchesVisibleConversationAlias(alias)) return false;
+  if (conversationAlias && (conversationAlias.routeKey !== alias.routeKey || conversationAlias.localId !== alias.localId ||
+      conversationAlias.firstUserId !== alias.firstUserId)) return false;
+  // Neither a stale mounted transcript nor a stored witness may rebind a local
+  // identity to another route or first message in this document.
+  if (Array.from(verifiedAliases.values()).some(previous =>
+    (previous.localId === alias.localId && (previous.routeKey !== alias.routeKey || previous.firstUserId !== alias.firstUserId)) ||
+    (previous.firstUserId === alias.firstUserId && previous.routeKey !== alias.routeKey),
+  )) return false;
+  conversationAlias = { routeKey: alias.routeKey, localId: alias.localId, firstUserId: alias.firstUserId };
+  verifiedAliases.delete(alias.routeKey);
+  verifiedAliases.set(alias.routeKey, conversationAlias);
   if (verifiedAliases.size > MAX_VERIFIED_ALIASES) verifiedAliases.delete(verifiedAliases.keys().next().value!);
   return true;
 }
