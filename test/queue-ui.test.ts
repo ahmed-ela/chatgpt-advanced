@@ -910,7 +910,7 @@ describe("Persistent message queue UI", () => {
     expect(tab.composer.innerText).toBe("Keep this unsent draft");
     expect(tab.shadow.textContent).not.toContain("Reload after the response finishes");
     draft(tab, ""); await poll(tab);
-    expect(tab.shadow.textContent).toContain("Reload after the response finishes to reconnect the queue.");
+    expect(tab.shadow.textContent).toContain("temporary conversation ID is not linked to this saved chat");
     expect(sends).toBe(1);
   });
 
@@ -936,8 +936,147 @@ describe("Persistent message queue UI", () => {
     expect(sends).toBe(0);
     const host = tab.doc.getElementById("plannotator-message-queue")!;
     expect(host.dataset.queueState).toBe("identity-unverified");
-    expect(tab.shadow.textContent).toContain("Reload after the response finishes to reconnect the queue.");
+    expect(tab.shadow.textContent).toContain("temporary conversation ID is not linked to this saved chat");
     expect(tab.shadow.textContent).not.toContain("confirm this response finished");
+    const id = (await persisted()).items[0]!.id;
+    button(tab, "steer", id).click();
+    await waitFor(() => !tab.queue.dispatching, "identity-specific Send now warning");
+    expect(tab.shadow.textContent).toContain("temporary conversation ID is not linked to this saved chat");
+    expect(tab.shadow.textContent).not.toContain("Wait for this conversation to finish loading before using Send now");
+    expect(tab.requests.some(request => request.action === "bind-conversation")).toBe(false);
+    expect(sends).toBe(0);
+  });
+
+  test.each(["visible", "hidden"] as const)("a fresh %s document restores its witnessed local identity and drains two messages once", async state => {
+    const original = await createTab({ newChat: true });
+    const localId = "local-chatgpt:77777777-7777-4777-8777-777777777777";
+    draft(original, "Witnessed first native message");
+    original.action.addEventListener("click", () => {
+      original.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+      const main = original.doc.querySelector("main")!;
+      main.setAttribute("data-chatgpt-selection-conversation-id", localId);
+      main.innerHTML = `<article data-chatgpt-search-unit-key="11111111-1111-4111-8111-111111111111:user" data-chatgpt-search-message-ids="11111111-1111-4111-8111-111111111111"><div data-user-message-bubble="true">Witnessed first native message</div></article>
+        <article data-chatgpt-selection-message-id="22222222-2222-4222-8222-222222222222"><div data-markdown-text-style="assistant-message">Completed first response</div><button data-testid="copy-turn-action-button">Copy</button></article>`;
+      draft(original, ""); busy(original, true);
+    }, { once: true });
+    original.action.click(); await poll(original);
+    const first = await enqueue(original, "First durable follow-up");
+    const second = await enqueue(original, "Second durable follow-up");
+    expect((await persisted()).conversationAliases).toEqual([{
+      routeKey: key, localId, firstUserId: "11111111-1111-4111-8111-111111111111",
+    }]);
+    original.queue.stop();
+    // A new realm has no module-memory alias. The durable record must supply
+    // the exact witnessed tuple before it can acknowledge or send anything.
+    const reopened = await createTab({ visibility: state });
+    reopened.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", localId);
+    const native = simulateNativeChat(reopened);
+    busy(reopened, false); now += 4000;
+    await poll(reopened);
+    expect(native.sent).toEqual(["First durable follow-up"]);
+    expect(reopened.doc.getElementById("plannotator-message-queue")!.dataset.queueIdentitySource).toBe("persisted");
+    expect(reopened.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+    native.finish(); now += 4000;
+    await poll(reopened);
+    expect(native.sent).toEqual(["First durable follow-up", "Second durable follow-up"]);
+    expect(reopened.shadow.querySelector(`li[data-id='${second}']`)).toBeNull();
+    native.finish(); now += 4000; await poll(reopened);
+    expect((await persisted()).items).toHaveLength(0);
+    await poll(reopened);
+    expect(native.sent).toHaveLength(2);
+  });
+
+  test("a hidden first response captures and persists identity through mutations with its fallback timer disabled", async () => {
+    const tab = await createTab({ newChat: true, visibility: "hidden" });
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    draft(tab, "First send before a long background response");
+    tab.action.addEventListener("click", () => {
+      // ChatGPT can clear the input before the async first-send request assigns
+      // its saved URL. Let that input-triggered tick finish on the empty route.
+      draft(tab, ""); busy(tab, true);
+    }, { once: true });
+    tab.action.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await waitFor(() => !tab.queue.polling, "initial input tick before route assignment");
+    expect(tab.queue.state).toBeNull();
+    tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const main = tab.doc.querySelector("main")!;
+    main.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:77777777-7777-4777-8777-777777777777");
+    main.innerHTML = `<article data-chatgpt-search-unit-key="11111111-1111-4111-8111-111111111111:user" data-chatgpt-search-message-ids="11111111-1111-4111-8111-111111111111"><div data-user-message-bubble="true">First send before a long background response</div></article>
+      <article data-chatgpt-selection-message-id="22222222-2222-4222-8222-222222222222"><div data-markdown-text-style="assistant-message">First response</div><button data-testid="copy-turn-action-button">Copy</button></article>`;
+    await waitFor(() => Boolean(tab.queue.state?.conversationAliases?.length), "background first-send identity persisted without polling");
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueIdentityWitness).toBe("verified");
+    now += 121000;
+    Object.defineProperty(tab.dom, "Date", { value: class extends Date { static now() { return now; } }, configurable: true });
+    await enqueue(tab, "Send after the long first response");
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => native.sent.length === 1, "background completion dispatch without polling");
+    await waitFor(() => !tab.queue.dispatching, "background send acknowledgement");
+    expect(native.sent).toEqual(["Send after the long first response"]);
+    expect(tab.shadow.querySelectorAll("li")).toHaveLength(0);
+  });
+
+  test("an unresolved first-send witness does not write a heartbeat for each streamed token", async () => {
+    const tab = await createTab({ newChat: true, visibility: "hidden" });
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    draft(tab, "Wait for an identity marker");
+    tab.action.addEventListener("click", () => { draft(tab, ""); busy(tab, true); }, { once: true });
+    tab.action.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const main = tab.doc.querySelector("main")!;
+    main.innerHTML = `<article data-chatgpt-search-unit-key="11111111-1111-4111-8111-111111111111:user" data-chatgpt-search-message-ids="11111111-1111-4111-8111-111111111111"><div data-user-message-bubble="true">Wait for an identity marker</div></article><span id="thinking">Thinking</span>`;
+    await waitFor(() => Boolean(tab.queue.state) && !tab.queue.polling, "route transition read");
+    const before = tab.requests.filter(request => request.action === "heartbeat").length;
+    for (let token = 0; token < 10; token++) {
+      main.querySelector("#thinking")!.textContent = `Thinking token ${token}`;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    expect(tab.requests.filter(request => request.action === "heartbeat")).toHaveLength(before);
+    main.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:77777777-7777-4777-8777-777777777777");
+    await waitFor(() => Boolean(tab.queue.state?.conversationAliases?.length), "late identity attribute persisted");
+  });
+
+  test.each(["local-id", "first-user", "mixed-id"])("a stored identity cannot authorize a changed %s transcript", async mismatch => {
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "witness", action: "bind-conversation",
+      conversationAlias: { routeKey: key, localId: "local-chatgpt:77777777-7777-4777-8777-777777777777", firstUserId: "11111111-1111-4111-8111-111111111111" },
+    }, "previous-witness", now);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "previous-tab", action: "enqueue", id: "saved-item", text: "Never send into a changed transcript" }, "previous-tab", now);
+    const tab = await createTab();
+    const main = tab.doc.querySelector("main")!;
+    main.setAttribute("data-chatgpt-selection-conversation-id", mismatch === "local-id"
+      ? "local-chatgpt:88888888-8888-4888-8888-888888888888" : "local-chatgpt:77777777-7777-4777-8777-777777777777");
+    if (mismatch === "first-user") main.querySelector("[data-chatgpt-search-message-ids]")!.setAttribute("data-chatgpt-search-message-ids", "99999999-9999-4999-8999-999999999999");
+    if (mismatch === "mixed-id") main.lastElementChild!.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:88888888-8888-4888-8888-888888888888");
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000; await poll(tab);
+    expect(native.sent).toHaveLength(0);
+    expect((await persisted()).items[0]?.status).toBe("queued");
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("identity-unverified");
+  });
+
+  test("a delayed identity read cannot restore the old chat after navigation", async () => {
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "witness", action: "bind-conversation",
+      conversationAlias: { routeKey: key, localId: "local-chatgpt:77777777-7777-4777-8777-777777777777", firstUserId: "11111111-1111-4111-8111-111111111111" },
+    }, "previous-witness", now);
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "previous-tab", action: "enqueue", id: "saved-item", text: "Keep in the original chat" }, "previous-tab", now);
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let firstRead = true;
+    const tab = await createTab({ returnBeforeRead: true, before(request) {
+      if (request.action === "heartbeat" && firstRead) { firstRead = false; return blocked; }
+    } });
+    tab.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:77777777-7777-4777-8777-777777777777");
+    const native = simulateNativeChat(tab);
+    tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    busy(tab, false); release();
+    await waitFor(() => !tab.queue.polling, "old route read returns");
+    await poll(tab);
+    expect(native.sent).toHaveLength(0);
+    expect((await persisted()).items[0]?.status).toBe("queued");
+    expect(tab.requests.some(request => request.action === "bind-conversation")).toBe(false);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("empty");
   });
 
   test("commits the message before clearing the composer and survives a fresh tab", async () => {

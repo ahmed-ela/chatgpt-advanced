@@ -1,4 +1,5 @@
 import { EncryptedRecordStore } from "./encrypted-storage";
+import type { ConversationAlias } from "./chatgpt-dom";
 
 /** Persistent per-conversation queue. Changes use strictly durable encrypted compare-and-swap commits. */
 export const QUEUE_MESSAGE_TYPE = "plannotator:queue";
@@ -9,6 +10,8 @@ export const QUEUE_SEND_TIMEOUT_MS = 30_000;
 export const QUEUE_BUSY_MS = 3_000;
 export const QUEUE_MAX_TEXT = 200_000;
 export const QUEUE_MAX_ITEMS = 100;
+const MAX_CONVERSATION_ALIASES = 16;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type QueueStatus = "queued" | "editing" | "claimed" | "sending" | "waiting" | "review";
 export interface QueueItem {
@@ -33,8 +36,10 @@ export interface QueueState {
   busyUntil?: number;
   /** Required completed-reply anchor; may start with the currently generating turn. */
   lastCompletedUserMessageId?: string;
+  /** Exact first-send identity witnesses; never inferred from a queue anchor. */
+  conversationAliases?: ConversationAlias[];
 }
-export type QueueAction = "read" | "enqueue" | "begin-edit" | "edit-heartbeat" | "cancel-edit" | "steer" | "edit" | "move" | "remove" | "pause" | "heartbeat" | "claim" | "attempt" | "ack" | "anchor" | "complete" | "release" | "review" | "retry";
+export type QueueAction = "read" | "bind-conversation" | "enqueue" | "begin-edit" | "edit-heartbeat" | "cancel-edit" | "steer" | "edit" | "move" | "remove" | "pause" | "heartbeat" | "claim" | "attempt" | "ack" | "anchor" | "complete" | "release" | "review" | "retry";
 export interface QueueRequest {
   type: typeof QUEUE_MESSAGE_TYPE;
   key: string;
@@ -49,6 +54,7 @@ export interface QueueRequest {
   afterUserMessageId?: string;
   reason?: string;
   editToken?: string;
+  conversationAlias?: ConversationAlias;
 }
 export type QueueResponse = { ok: true; state: QueueState; claimed?: QueueItem } | { ok: false; error: string };
 interface StoredQueue extends QueueState {
@@ -58,6 +64,29 @@ interface StoredQueue extends QueueState {
   legacyBusyUntil?: number;
 }
 export interface QueueResult { state: QueueState; claimed?: QueueItem; changed: boolean }
+
+export function isValidConversationAlias(value: unknown): value is ConversationAlias {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const alias = value as Partial<ConversationAlias>;
+  return typeof alias.routeKey === "string" && alias.routeKey.startsWith("chatgpt:") && UUID_PATTERN.test(alias.routeKey.slice("chatgpt:".length)) &&
+    typeof alias.localId === "string" && alias.localId.startsWith("local-chatgpt:") && UUID_PATTERN.test(alias.localId.slice("local-chatgpt:".length)) &&
+    typeof alias.firstUserId === "string" && UUID_PATTERN.test(alias.firstUserId);
+}
+
+function conflictingConversationAlias(a: ConversationAlias, b: ConversationAlias): boolean {
+  return (a.localId === b.localId && (a.routeKey !== b.routeKey || a.firstUserId !== b.firstUserId)) ||
+    (a.firstUserId === b.firstUserId && a.routeKey !== b.routeKey);
+}
+
+function validateStoredConversationAliases(state: StoredQueue): void {
+  if (state.conversationAliases === undefined) return;
+  const aliases = state.conversationAliases;
+  if (!Array.isArray(aliases) || aliases.length > MAX_CONVERSATION_ALIASES ||
+      aliases.some(alias => !isValidConversationAlias(alias) || alias.routeKey !== state.key) ||
+      aliases.some((alias, index) => aliases.slice(0, index).some(previous => conflictingConversationAlias(alias, previous)))) {
+    throw new Error("Stored conversation identity is invalid. Existing queue data has been preserved.");
+  }
+}
 
 /** New unsaved chats have no stable key. Local URLs are supported for the extension's fixtures. */
 export function getQueueKey(url: string): string | null {
@@ -97,6 +126,7 @@ export class QueueStore {
     return this.storage.apply(request.key,
       () => ({ key: request.key, revision: 0, paused: false, items: [], busyLeases: [] }),
       state => {
+        validateStoredConversationAliases(state);
         const before = JSON.stringify(state);
         recover(state, now);
         const claimed = mutate(state, request, owner, now);
@@ -115,7 +145,9 @@ export class QueueStore {
 function validateRequest(request: QueueRequest): void {
   if (!request || request.type !== QUEUE_MESSAGE_TYPE || typeof request.key !== "string" || request.key.length > 2_048 || !/^(chatgpt|claude|gemini|fixture):/.test(request.key)) throw new Error("Invalid queue conversation");
   if (typeof request.clientId !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.clientId)) throw new Error("Invalid queue client");
-  if (!["read", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "anchor", "complete", "release", "review", "retry"].includes(request.action)) throw new Error("Unknown queue action");
+  if (!["read", "bind-conversation", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "anchor", "complete", "release", "review", "retry"].includes(request.action)) throw new Error("Unknown queue action");
+  if (request.conversationAlias !== undefined && (!isValidConversationAlias(request.conversationAlias) || request.conversationAlias.routeKey !== request.key)) throw new Error("Invalid conversation identity witness");
+  if (request.action === "bind-conversation" && !request.conversationAlias) throw new Error("Missing conversation identity witness");
   if (request.id !== undefined && (typeof request.id !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.id))) throw new Error("Invalid queued message ID");
   if (request.editToken !== undefined && (typeof request.editToken !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.editToken))) throw new Error("Invalid queue edit token");
   if (["begin-edit", "edit-heartbeat", "cancel-edit"].includes(request.action) && !request.editToken) throw new Error("Missing queue edit token");
@@ -175,6 +207,14 @@ function mutate(state: StoredQueue, request: QueueRequest, owner: string, now: n
   };
   switch (request.action) {
     case "read": return;
+    case "bind-conversation": {
+      const alias = request.conversationAlias!;
+      const aliases = state.conversationAliases ?? [];
+      if (aliases.some(previous => conflictingConversationAlias(previous, alias))) throw new Error("Conversation identity witness conflicts with an existing binding");
+      if (aliases.some(previous => previous.routeKey === alias.routeKey && previous.localId === alias.localId && previous.firstUserId === alias.firstUserId)) return;
+      state.conversationAliases = [...aliases, { routeKey: alias.routeKey, localId: alias.localId, firstUserId: alias.firstUserId }].slice(-MAX_CONVERSATION_ALIASES);
+      return;
+    }
     case "heartbeat": {
       // Each document clears only its own evidence as soon as its response
       // finishes; a stale idle tab cannot override another document's lease.

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
 import { getQueueKey, QUEUE_BUSY_MS, QUEUE_CLAIM_MS, QUEUE_EDIT_MS, QUEUE_MESSAGE_TYPE, QUEUE_SEND_TIMEOUT_MS, QueueStore, type QueueAction, type QueueRequest } from "../src/queue-store";
+import type { ConversationAlias } from "../src/chatgpt-dom";
+import { EncryptedRecordStore } from "../src/encrypted-storage";
 
 let factory: IDBFactory;
 let stores: QueueStore[];
@@ -28,9 +30,95 @@ function enqueue(id: string, text = id, target = store, now = start) {
   return target.apply(request("enqueue", { id, text }), ownerA, now);
 }
 function read(target = store, now = start) { return target.apply(request("read"), ownerA, now); }
+const identityKey = "chatgpt:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+function witness(index = 1): ConversationAlias {
+  return { routeKey: identityKey, localId: `local-chatgpt:cccccccc-cccc-4ccc-8ccc-${index.toString(16).padStart(12, "0")}`,
+    firstUserId: "11111111-1111-4111-8111-111111111111" };
+}
 
 
 describe("persistent AI conversation queue", () => {
+  test("exact witnessed aliases survive encrypted reopen without changing queue or pause state", async () => {
+    await store.apply(request("enqueue", { key: identityKey, id: "saved", text: "Keep this message", afterUserMessageId: "existing-anchor" }), ownerA, start);
+    await store.apply(request("pause", { key: identityKey, paused: true }), ownerA, start);
+    const bound = await store.apply(request("bind-conversation", { key: identityKey, conversationAlias: witness() }), ownerA, start);
+    expect(bound.state.conversationAliases).toEqual([witness()]);
+    expect(bound.state.items.map(item => item.text)).toEqual(["Keep this message"]);
+    expect(bound.state.paused).toBe(true);
+    expect(bound.state.lastCompletedUserMessageId).toBe("existing-anchor");
+    const repeated = await store.apply(request("bind-conversation", { key: identityKey, conversationAlias: witness() }), ownerB, start);
+    expect(repeated.changed).toBe(false);
+    expect(repeated.state).toEqual(bound.state);
+    await store.close();
+    const reopened = newStore();
+    expect((await reopened.apply(request("read", { key: identityKey }), ownerB, start)).state).toEqual(bound.state);
+  });
+
+  test("concurrent binding writers preserve distinct exact tuples and retain at most sixteen", async () => {
+    const other = newStore();
+    await Promise.all(Array.from({ length: 18 }, (_, index) => (index % 2 ? other : store).apply(
+      request("bind-conversation", { key: identityKey, conversationAlias: witness(index + 1) }), ownerA, start,
+    )));
+    const aliases = (await store.apply(request("read", { key: identityKey }), ownerB, start)).state.conversationAliases!;
+    expect(aliases).toHaveLength(16);
+    expect(new Set(aliases.map(alias => alias.localId)).size).toBe(16);
+    expect(aliases.every(alias => alias.routeKey === identityKey && alias.firstUserId === witness().firstUserId)).toBe(true);
+    await store.close(); await other.close();
+    expect((await newStore().apply(request("read", { key: identityKey }), ownerB, start)).state.conversationAliases).toEqual(aliases);
+  });
+
+  test("conflicting and malformed identity bindings cannot alter saved messages or a prior witness", async () => {
+    await store.apply(request("enqueue", { key: identityKey, id: "saved", text: "Keep this message" }), ownerA, start);
+    await store.apply(request("bind-conversation", { key: identityKey, conversationAlias: witness() }), ownerA, start);
+    const before = (await store.apply(request("read", { key: identityKey }), ownerA, start)).state;
+    const invalid = [
+      undefined, null, [], {}, { ...witness(), localId: "local-chatgpt:invalid" },
+      { ...witness(), firstUserId: "invalid" }, { ...witness(), firstUserId: 1 },
+      { ...witness(), routeKey: "chatgpt:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+      { ...witness(), firstUserId: "22222222-2222-4222-8222-222222222222" },
+    ];
+    for (const alias of invalid) {
+      await expect(store.apply(request("bind-conversation", { key: identityKey, conversationAlias: alias as ConversationAlias }), ownerB, start)).rejects.toThrow();
+      expect((await store.apply(request("read", { key: identityKey }), ownerA, start)).state).toEqual(before);
+    }
+    for (const badKey of [key, "claude:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "gemini:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]) {
+      await expect(store.apply(request("bind-conversation", { key: badKey, conversationAlias: { ...witness(), routeKey: badKey } }), ownerB, start)).rejects.toThrow();
+    }
+    expect((await store.apply(request("read", { key: identityKey }), ownerA, start)).state).toEqual(before);
+  });
+
+  test.each([
+    ["non-array", null], ["malformed tuple", [{}]],
+    ["foreign route", [{ ...witness(), routeKey: "chatgpt:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }]],
+    ["conflicting tuple", [witness(), { ...witness(), firstUserId: "22222222-2222-4222-8222-222222222222" }]],
+    ["oversized list", Array.from({ length: 17 }, (_, index) => witness(index + 1))],
+  ])("corrupt stored identity (%s) fails closed without deleting the legacy queue", async (_description, aliases) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = factory.open("test-queue", 1);
+      open.onupgradeneeded = () => open.result.createObjectStore("queues", { keyPath: "key" });
+      open.onsuccess = () => resolve(open.result as unknown as IDBDatabase);
+      open.onerror = () => reject(open.error);
+    });
+    const stored = { key: identityKey, revision: 3, paused: true,
+      items: [{ id: "saved", text: "Keep this message", createdAt: start, status: "queued" }], conversationAliases: aliases };
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("queues", "readwrite");
+      transaction.objectStore("queues").put(stored);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+    await expect(store.apply(request("read", { key: identityKey }), ownerA, start)).rejects.toThrow("Stored conversation identity is invalid");
+    // The existing migration encrypts the legacy row before queue validation.
+    // Read its authenticated value without a mutation to prove it survived.
+    const retainedStorage = new EncryptedRecordStore<typeof stored>(factory, "test-queue", "queues");
+    try {
+      const retained = await retainedStorage.apply(identityKey, () => stored,
+        value => ({ value, result: value, changed: false }));
+      expect(retained).toEqual(stored);
+    } finally { await retainedStorage.close(); }
+  });
+
   test("conversation keys follow chats through project URLs and reject unsaved chats", () => {
     expect(getQueueKey("https://chatgpt.com/c/abc-123?model=x")).toBe("chatgpt:abc-123");
     expect(getQueueKey("https://chatgpt.com/g/g-demo/project/c/abc-123")).toBe("chatgpt:abc-123");
