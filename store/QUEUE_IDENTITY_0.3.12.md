@@ -35,7 +35,7 @@ Two more follow-ups were queued during a response and the test tab was left in t
 
 Local proof files are `outputs/threadlane-identity-2026-10-11/patched-background-result.json` and `patched-autosend.jpg`. These contain only the harmless diagnostic chat.
 
-Firefox packages were built and validated, but Firefox live runtime testing and store publication are not part of this verification. Neither store submission was updated by this task.
+Firefox packages were built and validated, but Firefox live runtime testing and store publication are not part of this verification. The Chrome submission was subsequently updated as recorded below; no Mozilla submission or Firefox update-feed promotion was performed.
 
 ## Release artifacts
 
@@ -48,3 +48,11 @@ Production Firefox ZIP SHA-256:
 `412d2e3194ccb71ca60ff575d40a88188050bd15c6e6861af8e58ef1860b323b`
 
 The final candidates are under `outputs/threadlane-identity-2026-10-11/release-final/` in the task workspace. Earlier files under `release/` are superseded and must not be uploaded.
+
+## Chrome Store submission
+
+Source [PR #7](https://github.com/ahmed-ela/chatgpt-advanced/pull/7) was squash-merged as `d24226ea5ff8bdc6feef1b8172412063f5a9a101`. The verified Chrome ZIP above was uploaded using its byte-identical copy at `/Users/ahmedelamin/Downloads/threadlane-0.3.12.zip`.
+
+On **2026-10-11 at 17:40:30.400 UTC**, the publisher dashboard signed in as `threadlane.support@gmail.com` confirmed **0.3.12 Pending review**, revision `00007`, for item `fgajmfkookghcacddnmhfkamefndgfei`. Public distribution, all regions, and free pricing were retained; automatic publication after approval was checked. The dashboard's published version remained **0.3.11**. Submission does not establish approval, availability, or installation of 0.3.12.
+
+Evidence in `outputs/threadlane-identity-2026-10-11/` includes `pending-package-0.3.12-ax.txt`, `submitted-distribution-ax.txt`, `automatic-publication-0.3.12.png`, `distribution-0.3.12.png`, and `pending-review-0.3.12.png`. See [the submission status record](SUBMISSION_STATUS.md) for the package path and retained historical submissions.

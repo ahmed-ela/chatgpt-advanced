@@ -1,16 +1,36 @@
 # Chrome Web Store submission status
 
-Latest update verified in the Threadlane publisher dashboard on **2026-10-07 at 13:16:53.511 UTC**.
+Latest update verified in the Threadlane publisher dashboard on **2026-10-11 at 17:40:30.400 UTC**.
 
-**Update 0.3.11 is pending review**, store revision `00006`, on the existing public item. Automatic publication after approval is enabled. The supplied flame icon and matching promotional tile are saved in the submitted listing, along with the ChatGPT, Claude, and Gemini screenshots. Pending review is not approval or availability of the update or new artwork.
+**Update 0.3.12 is pending review**, store revision `00007`, on the existing public item. Automatic publication after approval is enabled. Pending review is not approval or availability of this update.
 
-**Version 0.3.6 is published and publicly available.** The listing shows version 0.3.6, an Updated date of October 7, 2026, and Add to Chrome. [Install Threadlane](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+**The publisher dashboard identifies version 0.3.11 as published on the public item.** The pending 0.3.12 update has not replaced it. [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
-The submitted **0.3.11 production package** retains the identity, send-acknowledgement, and queue header hover changes from 0.3.10 and replaces the four extension icon PNGs. Source commits and local builds do not change the live Store version. See [the icon release report](ICON_RELEASE_0.3.11.md) for exact asset provenance and package verification, and [the queue hover release report](QUEUE_HOVER_0.3.10.md) for the preceding runtime change and local deployment limits.
+The submitted **0.3.12 production package** fixes ChatGPT queue identity recovery during the first response and preserves witnessed identity bindings across content-script restarts. The shared Chrome/Firefox code adds no permissions or external data transmission. See [the identity recovery report](QUEUE_IDENTITY_0.3.12.md) for the reproduced cause, safety guards, automated regressions, and live Chrome background-send verification. Source commits and local builds do not change the live Store version.
 
-Public-listing evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
+The earlier public-listing check confirmed 0.3.6 was available on October 7; that historical evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
 
-## Current public update 0.3.11
+## Current public update 0.3.12
+
+- Publisher/account: Threadlane, `threadlane.support@gmail.com`.
+- Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
+- Store revision: `00007`.
+- Update status: **Pending review**; published version remains **0.3.11**.
+- Distribution: existing Public, all-regions, free channel retained.
+- Automatic publication after approval: enabled; the checked submission dialog was captured before final submission.
+- Confirmation: **2026-10-11 at 17:40:30.400 UTC**.
+
+Submitted package: `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-identity-2026-10-11/release-final/0.3.12/threadlane-0.3.12.zip`. The identical copy at `/Users/ahmedelamin/Downloads/threadlane-0.3.12.zip` was selected for upload.
+
+SHA-256: `96c1ceee3765fa7ff46fe03abdbf05be185eb7ae896db4c5ee89b27e1a7da998`.
+
+The verified archive was uploaded to the existing public item and successfully submitted for review. Source [PR #7](https://github.com/ahmed-ela/chatgpt-advanced/pull/7) was squash-merged as `d24226ea5ff8bdc6feef1b8172412063f5a9a101`. All 602 tests, TypeScript, version consistency, production package validation, and independent package review passed. Firefox's package was built and validated, but this Chrome workflow did not perform Firefox live qualification, Mozilla submission, or update-feed promotion.
+
+Evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-identity-2026-10-11/`: `pending-package-0.3.12-ax.txt`, `submitted-distribution-ax.txt`, `automatic-publication-0.3.12.png`, `distribution-0.3.12.png`, and `pending-review-0.3.12.png`. The package accessibility capture showed pending draft version 0.3.12, revision 00007, and published version 0.3.11; the distribution captures confirmed Pending review and the retained public channel.
+
+## Historical public submission 0.3.11
+
+The following records the October 7 submission, before the dashboard confirmed 0.3.11 published on October 11. Its pending status and then-published 0.3.6 version are historical.
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
