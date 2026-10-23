@@ -2,7 +2,18 @@
 
 Unchecked items are release gates, not claims that checks have passed. Record the tested commit, version, ZIP hash, browser version, provider, date, and observed result when completing them. Public distribution is authorized and still requires store review. [Chrome distribution guidance](https://developer.chrome.com/docs/webstore/cws-dashboard-distribution/).
 
-Last recorded distribution state: public Chrome 0.3.6 replaced 0.2.5 on 2026-10-05 and is **Pending review**, with automatic publication after approval. Firefox public 0.3.5 remains Awaiting Review and its signed beta feed advertises 0.3.2. Chrome 0.3.6's retained-animation patch passed live hidden-tab sending on ChatGPT; the earlier background check passed on ChatGPT and Claude, while Gemini retained an unfinished native response animation when hidden. Firefox 0.3.6 live verification is pending because computer use could not complete the temporary-add-on file picker; neither Firefox channel was updated. Use [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md), [FIREFOX_SUBMISSION_STATUS.md](FIREFOX_SUBMISSION_STATUS.md), [AUTOSEND_PATCH_0.3.6.md](AUTOSEND_PATCH_0.3.6.md), and [BACKGROUND_QUEUE_VERIFICATION.md](BACKGROUND_QUEUE_VERIFICATION.md) for dated evidence. The unchecked gates below remain requirements for subsequent releases, rather than a claim that every gate was exercised in this submission.
+Last verified Chrome dashboard state: **0.3.15 Pending review**, revision `00008`; **0.3.12 remains published**. Successful submission was confirmed October 23, 2026 at 04:42 UTC (October 22 at 21:42 PDT). [The 0.3.15 release report](REPLY_BATCH_0.3.15.md) records qualification scope; [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) records submission separately from public availability. Earlier Firefox records are historical and neither Firefox channel is promoted by this Chrome release. The unchecked reusable gates below do not imply that every operation was repeated for this patch.
+
+## Recorded 0.3.15 qualification
+
+- [x] Full suite passed: 691 tests, 3,120 assertions across 16 files; TypeScript, version consistency, package validation, and independent production-script byte parity checks passed.
+- [x] Exact ten-file production candidate installed under the existing local extension identity, preserving storage; user completed manual Reload, and fresh provider tabs showed no development attributes.
+- [x] ChatGPT, Claude, and Gemini transferred and cleared a reply batch, kept it cleared after refresh, and inserted a later batch containing only new replies. Claude's existing-draft guard preserved the draft and note. ChatGPT native Send received `BATCH_THREE_OK`; no Claude or Gemini message was sent. Test-generated drafts were cleared.
+- [x] Hosted privacy policy updated and read back with exact content parity.
+- [x] Verified Chrome ZIP submitted successfully: SHA-256 `1aa14a7cdcfb8c48fa36ef185b197476cba520a092417f83fa0985b4a8f59dcb`. Dashboard confirms Pending review, draft 0.3.15, revision 00008, published 0.3.12; Public/free/all-regions distribution and automatic publication after approval were verified.
+- [x] Firefox archive built and validated; no Mozilla publication requested or performed.
+- [ ] Verify 0.3.15 approval and public availability after review.
+- [ ] Install the publicly available 0.3.15 from the real listing in a clean profile and verify its behavior.
 
 ## Local candidate
 
@@ -18,7 +29,7 @@ Use a separate test profile with a production candidate, and harmless sample con
 For **each of ChatGPT, Claude, and Gemini**:
 
 - [ ] Create an annotation, edit it, reload and reopen the conversation; verify the highlight/note returns. Delete it in one tab and verify it does not reappear in another or after reload.
-- [ ] Insert the annotation prompt, confirm existing drafts/attachments are protected, and confirm saved notes remain after insertion and send.
+- [ ] Insert the annotation prompt, confirm existing drafts/attachments are protected, and confirm successful insertion clears only the transferred reply batch. Verify failed insertion retains notes and newer local or remote edits survive.
 - [ ] Queue two distinguishable prompts during a response. Verify order, prompt send after positive completion, immediate removal of the acknowledged row, no duplicate sends, and waiting for the first queued reply before sending the second.
 - [ ] Pause an empty/nonempty queue; enqueue while paused; close/reopen tabs/browser; verify saved order, saved edits, and pause state persist.
 - [ ] Reorder with the drag handle and keyboard, edit a middle item without changing its slot, cancel an edit, delete an item, and use Send now without disturbing the order of remaining items.
@@ -34,7 +45,7 @@ Migration and isolation:
 
 ## Store draft and approval
 
-- [ ] Verify the confirmed threadlane.support@gmail.com publisher account and existing public item before updating it. Registration is complete and the last recorded 0.3.6 submission is pending review; check the current dashboard for any new account or security requirements.
+- [ ] Verify the confirmed threadlane.support@gmail.com publisher account and existing public item before updating it. Registration is complete; check the current dashboard for any new account or security requirements.
 - [ ] Enter the already hosted and verified [privacy policy](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf) in the dashboard, with threadlane.support@gmail.com as the support contact.
 - [ ] Review [LISTING.md](LISTING.md) and [PRIVACY_FIELDS.md](PRIVACY_FIELDS.md) against the actual dashboard and final ZIP. No placeholder may remain in a submitted field.
 - [ ] Add the 128px store icon, the supplied 440×280 small promotional tile, and actual screenshots showing annotations and the queue with sample text. Verify current dashboard dimensions and upload requirements before submission; keep source/promo files outside the extension ZIP.

@@ -29,7 +29,7 @@ Do not answer that the extension handles no user data merely because it is local
 | Identity, financial, health, authentication, or location data | No deliberate extraction or dedicated collection. User-provided text can contain such information; do not claim the extension can exclude it. Review the dashboard's category definitions when choosing checkboxes. |
 | Storage | Local extension-owned IndexedDB in the current Chrome profile. Note/queue records use AES-256-GCM with locally persisted non-extractable CryptoKeys. Legacy plaintext is removed only after verified encrypted persistence; website-local notes migrate when their conversation is visited. |
 | Transfer | User-directed insertion/sending to the currently selected AI provider through its native composer. No transfer to the publisher or an analytics service. |
-| Retention | Saved notes until deletion; queued content until removed/completed, with up to 20 edited-message recovery receipts per conversation retained until replaced or storage is cleared. Identifier-only records prevent duplicates and deleted-note resurrection. |
+| Retention | Saved notes until deletion or successful insertion of that reply batch into the native composer; queued content until removed/completed, with up to 20 edited-message recovery receipts per conversation retained until replaced or storage is cleared. Identifier-only records prevent duplicates and deleted-note resurrection. |
 | Device/profile sync | None. |
 | Sale, advertising, unrelated use, creditworthiness | None. |
 

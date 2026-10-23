@@ -1,16 +1,38 @@
 # Chrome Web Store submission status
 
-Latest update verified in the Threadlane publisher dashboard on **2026-10-11 at 17:40:30.400 UTC**.
+Latest update verified in the Threadlane publisher dashboard on **2026-10-23 at 04:42 UTC (October 22 at 21:42 PDT)**.
 
-**Update 0.3.12 is pending review**, store revision `00007`, on the existing public item. Automatic publication after approval is enabled. Pending review is not approval or availability of this update.
+**Update 0.3.15 is pending review**, store revision `00008`, on the existing public item. Automatic publication after approval is enabled. Pending review is not approval or availability of this update.
 
-**The publisher dashboard identifies version 0.3.11 as published on the public item.** The pending 0.3.12 update has not replaced it. [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). This record supersedes the earlier submission status text in [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+**The publisher dashboard identifies version 0.3.12 as published on the public item.** The pending 0.3.15 update has not replaced it. [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) distinguish this submission from public availability.
 
-The submitted **0.3.12 production package** fixes ChatGPT queue identity recovery during the first response and preserves witnessed identity bindings across content-script restarts. The shared Chrome/Firefox code adds no permissions or external data transmission. See [the identity recovery report](QUEUE_IDENTITY_0.3.12.md) for the reproduced cause, safety guards, automated regressions, and live Chrome background-send verification. Source commits and local builds do not change the live Store version.
+The submitted **0.3.15 production package** clears successfully transferred reply batches, preserving failed insertions and notes outside the transferred snapshot. It also includes the 0.3.13 completion-detection and 0.3.14 later-native-turn queue recovery changes. See [the reply release report](REPLY_BATCH_0.3.15.md) for guards, automated evidence, and live ChatGPT, Claude, and Gemini checks. Source commits and local builds do not change the live Store version.
 
 The earlier public-listing check confirmed 0.3.6 was available on October 7; that historical evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
 
-## Current public update 0.3.12
+## Current public update 0.3.15
+
+- Publisher/account: Threadlane, `threadlane.support@gmail.com`.
+- Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
+- Store revision: `00008`; draft package version: **0.3.15**.
+- Update status: **Pending review**; published version remains **0.3.12**.
+- Distribution: existing Public, all-regions, free channel verified.
+- Automatic publication after approval: enabled; checkbox `Value: 1` confirmed before final submission.
+- Successful-submission confirmation: **2026-10-23 at 04:42 UTC (October 22 at 21:42 PDT)**.
+
+Submitted package: `/Users/ahmedelamin/Documents/Codex/2026-10-22/thi/outputs/threadlane-reply-fix/release/0.3.15/threadlane-0.3.15.zip`.
+
+SHA-256: `1aa14a7cdcfb8c48fa36ef185b197476cba520a092417f83fa0985b4a8f59dcb`.
+
+The exact ten-file production candidate was installed under the existing local extension identity and activated by the user's manual Reload. Reply batches cleared after successful insertion on ChatGPT, Claude, and Gemini and remained cleared after refresh. Subsequent batches contained only new replies; ChatGPT's native Send received `BATCH_THREE_OK`. Claude's existing-draft guard preserved its draft and note. No Claude or Gemini message was sent, and test-generated drafts were cleared.
+
+All **691 tests** passed, with **3,120 assertions across 16 files**. TypeScript, version consistency, package validation, and independent production-script byte parity checks passed. The hosted privacy policy was updated and read back with exact content parity. Firefox's archive was built and validated; no Mozilla publication was requested or performed.
+
+Evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-22/thi/outputs/threadlane-reply-fix/`: `submission-result-ax.txt`, `submission-success.png`, `pending-package-ax.txt`, and `pending-package.png`, alongside provider live-check records and package hashes. The success dialog confirms submission; the package dashboard separately confirms Pending review, draft 0.3.15/revision 00008, and published 0.3.12. Approval and public availability of 0.3.15 require later verification.
+
+## Historical public submission 0.3.12
+
+The following records the October 11 submission, before the dashboard confirmed 0.3.12 published on October 22. Its pending status and then-published 0.3.11 version are historical.
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
