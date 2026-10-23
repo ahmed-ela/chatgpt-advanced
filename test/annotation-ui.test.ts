@@ -105,6 +105,35 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 describe("durable annotation UI", () => {
+  test("a migrated note without saved offsets clears after successful transfer", async () => {
+    const legacy = legacyNote("legacy-no-offsets", "Migrated reply should clear");
+    delete legacy.startOffset; delete legacy.endOffset;
+    const tab = await createTab({ legacy: [legacy] });
+    await tab.helpers.insertPrompt(tab.helpers.getUi()); await tab.helpers.flush();
+    expect(tab.doc.querySelector("[data-composer-markdown]")!.textContent).toContain("Migrated reply should clear");
+    expect(await saved()).toHaveLength(0);
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+  });
+
+  test("a note restored from an older provider message identity clears after transfer", async () => {
+    const legacy = { ...legacyNote("legacy-old-id", "Restored reply should clear"), messageId: "old-provider-message-id" };
+    const tab = await createTab({ legacy: [legacy] });
+    await tab.helpers.insertPrompt(tab.helpers.getUi()); await tab.helpers.flush();
+    expect(tab.doc.querySelector("[data-composer-markdown]")!.textContent).toContain("Restored reply should clear");
+    expect(await saved()).toHaveLength(0);
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+  });
+
+  test("immediate insertion consumes an edited reply before its debounced save", async () => {
+    const tab = await createTab();
+    const id = commit(tab, "Stored original reply"); await tab.helpers.flush();
+    tab.helpers.updateNote(id, { comment: "Edited reply transferred immediately" });
+    await tab.helpers.insertPrompt(tab.helpers.getUi()); await tab.helpers.flush();
+    expect(tab.doc.querySelector("[data-composer-markdown]")!.textContent).toContain("Edited reply transferred immediately");
+    expect(await saved()).toHaveLength(0);
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+  });
+
   test.each([
     "https://chatgpt.com/",
     "https://claude.ai/new",
@@ -307,25 +336,166 @@ describe("durable annotation UI", () => {
     expect(tab.helpers.state.selectionDraft).not.toBeNull();
   });
 
-  test("insert and native sends retain notes while an existing draft is protected", async () => {
+  test("successful blue-arrow transfer consumes the reply batch so the next batch contains only new replies", async () => {
+    const tab = await createTab();
+    commit(tab, "Reply batch ONE"); await tab.helpers.flush();
+    const composer = tab.doc.querySelector<HTMLElement>("[data-composer-markdown]")!;
+    await tab.helpers.insertPrompt(tab.helpers.getUi());
+    expect(composer.textContent).toContain("Reply batch ONE");
+    await tab.helpers.flush();
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    expect(await saved()).toHaveLength(0);
+    composer.textContent = "";
+    commit(tab, "Reply batch TWO"); await tab.helpers.flush();
+    await tab.helpers.insertPrompt(tab.helpers.getUi());
+    expect(composer.textContent).toContain("Reply batch TWO");
+    expect(composer.textContent).not.toContain("Reply batch ONE");
+  });
+
+  test("blocked insertion protects notes and native sends do not clear a newer untransferred batch", async () => {
     const tab = await createTab(); const id = commit(tab, "Persistent instruction"); await tab.helpers.flush();
     const composer = tab.doc.querySelector<HTMLElement>("[data-composer-markdown]")!;
     composer.textContent = "Unrelated native draft";
     await tab.helpers.insertPrompt(tab.helpers.getUi());
     expect(composer.textContent).toBe("Unrelated native draft");
     expect(tab.shadow.textContent).toContain("Send or clear the current draft");
+    expect(tab.helpers.getNotes().map(note => note.id)).toEqual([id]);
     composer.textContent = ""; await tab.helpers.insertPrompt(tab.helpers.getUi());
     expect(composer.textContent).toContain("Persistent instruction");
-    expect(tab.helpers.getNotes().map(note => note.id)).toEqual([id]);
+    await tab.helpers.flush();
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    const newerId = commit(tab, "Keep this new untransferred reply"); await tab.helpers.flush();
     tab.doc.querySelector<HTMLButtonElement>("#composer-submit-button")?.click();
     composer.dispatchEvent(new tab.dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true }) as unknown as Event);
     tab.doc.dispatchEvent(new tab.dom.Event("submit", { bubbles: true }) as unknown as Event);
     await Bun.sleep(120);
-    expect(tab.helpers.getNotes().map(note => note.id)).toEqual([id]);
-    expect((await saved()).map(note => note.id)).toEqual([id]);
+    expect(tab.helpers.getNotes().map(note => note.id)).toEqual([newerId]);
+    expect((await saved()).map(note => note.id)).toEqual([newerId]);
     tab.shadow.querySelector<HTMLButtonElement>("[data-action='toggle-notes-menu']")!.click();
-    expect(tab.shadow.textContent).toContain("Saved notes remain until you delete them");
+    expect(tab.shadow.textContent).toContain("Notes clear after they are inserted into your message");
     tab.shadow.querySelector<HTMLButtonElement>("[aria-label='Delete note 1']")!.click();
     await tab.helpers.flush(); expect(await saved()).toHaveLength(0);
+  });
+
+  test("a rejected composer transfer keeps the exact saved reply batch", async () => {
+    const tab = await createTab();
+    const id = commit(tab, "Do not lose a failed insertion"); await tab.helpers.flush();
+    const composer = tab.doc.querySelector<HTMLElement>("[data-composer-markdown]")!;
+    composer.addEventListener("beforeinput", event => event.preventDefault());
+    await tab.helpers.insertPrompt(tab.helpers.getUi());
+    expect(composer.textContent).toBe("");
+    expect(tab.shadow.textContent).toContain("Could not insert notes");
+    expect((await saved()).map(note => note.id)).toEqual([id]);
+    expect(tab.helpers.getNotes().map(note => note.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "consume")).toHaveLength(0);
+  });
+
+  test("only transferred notes clear while an unresolved saved note remains", async () => {
+    const unresolved = { ...legacyNote("unresolved", "Keep this unloaded note"), messageId: "missing-message", quote: "A quote absent from the transcript", messageExcerpt: "Missing response", contextBefore: "", contextAfter: "" };
+    const tab = await createTab({ legacy: [legacyNote("visible", "Transfer this reply"), unresolved] });
+    await tab.helpers.insertPrompt(tab.helpers.getUi()); await tab.helpers.flush();
+    expect(tab.doc.querySelector("[data-composer-markdown]")!.textContent).toContain("Transfer this reply");
+    expect(tab.doc.querySelector("[data-composer-markdown]")!.textContent).not.toContain("Keep this unloaded note");
+    expect(tab.helpers.getNotes()).toEqual([unresolved]);
+    expect(await saved()).toEqual([unresolved]);
+  });
+
+  test("a newer local edit and added reply survive an in-flight transfer snapshot", async () => {
+    const tab = await createTab();
+    const id = commit(tab, "Original snapshot reply"); await tab.helpers.flush();
+    const inserting = tab.helpers.insertPrompt(tab.helpers.getUi());
+    tab.helpers.updateNote(id, { comment: "Newer local edit" });
+    const added = commit(tab, "Added after insertion began");
+    await inserting; await tab.helpers.flush();
+    const prompt = tab.doc.querySelector("[data-composer-markdown]")!.textContent;
+    expect(prompt).toContain("Original snapshot reply");
+    expect(prompt).not.toContain("Newer local edit");
+    expect(prompt).not.toContain("Added after insertion began");
+    expect((await saved()).map(note => [note.id, note.comment])).toEqual([[id, "Newer local edit"], [added, "Added after insertion began"]]);
+    expect(tab.helpers.getNotes()).toHaveLength(2);
+  });
+
+  test.each([false, true])("conditional consumption preserves a newer durable edit from another tab after pending edit %s", async editBeforeTransfer => {
+    const gate = deferred(); let entered = false;
+    const tab = await createTab({ before(request) { if (request.action === "consume") { entered = true; return gate.promise; } } });
+    const id = commit(tab, "Transferred old revision"); await tab.helpers.flush();
+    if (editBeforeTransfer) tab.helpers.updateNote(id, { comment: "Transferred edited revision" });
+    const original = (await saved())[0]!;
+    await tab.helpers.insertPrompt(tab.helpers.getUi());
+    await waitFor(() => entered, "conditional consume request");
+    await store.apply({ type: ANNOTATION_MESSAGE_TYPE, key: getAnnotationKey(url)!, action: "upsert", notes: [{ ...original, comment: "Newer remote revision" }] });
+    await tab.helpers.refresh();
+    expect(tab.helpers.getNotes()[0]?.comment).toBe("Newer remote revision");
+    gate.resolve(); await tab.helpers.flush();
+    expect((await saved()).map(note => [note.id, note.comment])).toEqual([[id, "Newer remote revision"]]);
+    expect(tab.helpers.getNotes()[0]?.comment).toBe("Newer remote revision");
+    expect(tab.requests.filter(request => request.action === "upsert")).toHaveLength(editBeforeTransfer ? 2 : 1);
+  });
+
+  test.each(["before commit", "lost reply"] as const)("consumption retains a failed preceding edit %s and retries it before cleanup", async failure => {
+    let fail = false;
+    const reject = (request: AnnotationRequest) => { if (request.action === "upsert" && fail) throw new Error("Edit save temporarily unavailable"); };
+    const tab = await createTab(failure === "before commit" ? { before: reject } : { after: reject });
+    const id = commit(tab, "Older saved reply"); await tab.helpers.flush();
+    fail = true;
+    tab.helpers.updateNote(id, { comment: "Edited reply transferred once" }); await tab.helpers.flush();
+    await tab.helpers.insertPrompt(tab.helpers.getUi()); await tab.helpers.flush();
+    const composer = tab.doc.querySelector("[data-composer-markdown]")!;
+    const prompt = composer.textContent;
+    expect(prompt).toContain("Edited reply transferred once");
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    expect(tab.helpers.getSession().pending.size).toBe(1);
+    expect(tab.helpers.getSession().error).toContain("Edit save temporarily unavailable");
+    expect(tab.requests.filter(request => request.action === "consume")).toHaveLength(0);
+    fail = false; await tab.helpers.retry();
+    expect(await saved()).toHaveLength(0);
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    expect(tab.helpers.getSession().pending.size).toBe(0);
+    expect(composer.textContent).toBe(prompt);
+    expect(tab.requests.filter(request => request.action === "consume")).toHaveLength(1);
+  });
+
+  test.each(["before commit", "lost reply"] as const)("a cleanup failure %s keeps the transferred composer text and retries only consumption", async failure => {
+    let fail = true;
+    const reject = (request: AnnotationRequest) => { if (request.action === "consume" && fail) throw new Error("Cleanup temporarily unavailable"); };
+    const tab = await createTab(failure === "before commit" ? { before: reject } : { after: reject });
+    commit(tab, "Already transferred once"); await tab.helpers.flush();
+    await tab.helpers.insertPrompt(tab.helpers.getUi());
+    await waitFor(() => tab.helpers.getSession().error.includes("Cleanup temporarily unavailable"), "cleanup failure visible");
+    const composer = tab.doc.querySelector("[data-composer-markdown]")!;
+    const prompt = composer.textContent;
+    expect(prompt).toContain("Already transferred once");
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    expect(tab.helpers.getSession().pending.size).toBe(1);
+    expect(tab.shadow.querySelector("[role='alert']")?.textContent).toContain("Cleanup temporarily unavailable");
+    fail = false; await tab.helpers.retry();
+    expect(await saved()).toHaveLength(0);
+    expect(tab.helpers.getSession().pending.size).toBe(0);
+    expect(composer.textContent).toBe(prompt);
+    expect(tab.requests.filter(request => request.action === "upsert")).toHaveLength(1);
+  });
+
+  test("consumption follows an in-flight save without restoring the transferred note", async () => {
+    const gate = deferred(); let entered = false;
+    const tab = await createTab({ before(request) { if (request.action === "upsert") { entered = true; return gate.promise; } } });
+    commit(tab, "Transfer while its initial save is pending");
+    await waitFor(() => entered, "initial save in flight");
+    await tab.helpers.insertPrompt(tab.helpers.getUi());
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    gate.resolve(); await tab.helpers.flush();
+    expect(tab.helpers.getNotes()).toHaveLength(0);
+    expect(await saved()).toHaveLength(0);
+    expect(tab.helpers.getSession().pending.size).toBe(0);
+  });
+
+  test("a route change during insertion does not consume the original batch", async () => {
+    const tab = await createTab(); const id = commit(tab, "Original route batch"); await tab.helpers.flush();
+    const inserting = tab.helpers.insertPrompt(tab.helpers.getUi());
+    tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    tab.helpers.syncAnnotationRoute(tab.helpers.getUi());
+    await inserting;
+    expect(tab.doc.querySelector("[data-composer-markdown]")!.textContent).toBe("");
+    expect((await saved()).map(note => note.id)).toEqual([id]);
+    expect(tab.requests.filter(request => request.action === "consume")).toHaveLength(0);
   });
 });

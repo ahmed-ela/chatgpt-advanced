@@ -219,6 +219,43 @@ function simulateNativeChat(tab: Tab, renderUser?: (bubble: HTMLElement, text: s
   return result;
 }
 
+// The live ChatGPT turn has its final-state attribute several wrappers above
+// the response. Its native toolbar has no Rate controls or action test IDs.
+function currentChatGptResponse(doc: Document, state: string, responseId: string = crypto.randomUUID()): HTMLElement {
+  const turn = doc.createElement("div");
+  turn.setAttribute("data-talvt-turn-state", state);
+  turn.innerHTML = `<div><div><div><div><div data-chatgpt-selection-message-id="${responseId}" data-chatgpt-selection-conversation-id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa">
+    <div data-markdown-text-style="assistant-message">Native response content</div>
+  </div></div></div></div></div>
+  <div class="turn-action-controls">
+    <button aria-label="Copy">Copy</button><button aria-label="Share">Share</button><button aria-label="Read aloud">Read aloud</button>
+    <button aria-label="Regenerate response">Regenerate response</button><button aria-label="More actions">More</button>
+  </div>`;
+  return turn;
+}
+
+function simulateCurrentNativeChat(tab: Tab): { sent: string[]; finish: () => void } {
+  const sent: string[] = [];
+  let pending: HTMLElement | null = null;
+  tab.action.addEventListener("click", () => {
+    if (tab.action.getAttribute("aria-label")?.startsWith("Stop")) throw new Error("This fixture expects ordinary native sends");
+    const text = tab.composer.innerText;
+    sent.push(text);
+    postUserBubble(tab, text);
+    pending = currentChatGptResponse(tab.doc, "streaming");
+    pending.prepend(tab.doc.querySelector("main")!.lastElementChild!);
+    tab.doc.querySelector("main")!.append(pending);
+    draft(tab, ""); busy(tab, true);
+  });
+  return { sent, finish() {
+    if (!pending) throw new Error("No native response is pending");
+    // Deliberately no child-list, input, label, visibility, or timer stimulus.
+    // The state attribute alone must wake the hidden queue's next dispatch.
+    pending.setAttribute("data-talvt-turn-state", "complete");
+    pending = null;
+  } };
+}
+
 // Model the installed model-selector extension: a document capture listener
 // cancels the original click, awaits a background decision, then clicks the
 // same button with a one-shot bypass of its own interceptor.
@@ -1920,6 +1957,213 @@ describe("Persistent message queue UI", () => {
     expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
   });
 
+  test.each(["visible", "hidden"] as const)("the current native toolbar drains a %s queue from state-attribute changes alone with polling disabled", async state => {
+    const tab = await createTab({ visibility: state });
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    const initialAnswer = currentChatGptResponse(tab.doc, "streaming", "initial-assistant");
+    tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!.replaceWith(initialAnswer);
+    initialAnswer.prepend(tab.doc.querySelector("article[data-chatgpt-search-message-ids]")!);
+    const first = await enqueue(tab, "First follow-up to the native complete turn");
+    const second = await enqueue(tab, "Second follow-up after its native response");
+    const native = simulateCurrentNativeChat(tab);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    busy(tab, false);
+    await waitFor(() => !tab.queue.polling, "native stop has disappeared");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(native.sent).toEqual([]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+    const firstCompletedAt = Date.now();
+    initialAnswer.setAttribute("data-talvt-turn-state", "complete");
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "first attribute-only native completion", 500);
+    expect(Date.now() - firstCompletedAt).toBeLessThan(500);
+    expect(tab.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+    expect(Array.from(tab.shadow.querySelectorAll<HTMLElement>("li[data-id]")).map(row => row.dataset.id)).toEqual([second]);
+    expect((await persisted()).items.find(item => item.id === first)?.status).toBe("waiting");
+    expect(host.dataset.queueConfirmedSends).toBe("1");
+    busy(tab, false);
+    await waitFor(() => !tab.queue.polling, "second stop has disappeared");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(native.sent).toHaveLength(1);
+    const secondCompletedAt = Date.now();
+    native.finish();
+    await waitFor(() => native.sent.length === 2 && !tab.queue.dispatching, "second attribute-only native completion", 500);
+    expect(Date.now() - secondCompletedAt).toBeLessThan(500);
+    expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(0);
+    expect(host.dataset.queueConfirmedSends).toBe("2");
+    busy(tab, false);
+    await waitFor(() => !tab.queue.polling, "final stop has disappeared");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    native.finish();
+    await waitFor(() => tab.queue.state?.items.length === 0, "final attribute-only completion retires the durable anchor", 500);
+    expect(native.sent).toEqual(["First follow-up to the native complete turn", "Second follow-up after its native response"]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([first, second]);
+    expect(host.dataset.queueLastDispatchVisibility).toBe(state);
+    expect(host.dataset.queueCompletionReason).toBe("not-required");
+    expect(tab.shadow.querySelector(".error")).toBeNull();
+  });
+
+  test.each(["completion-unverified", "anchor-missing", "assistant-missing"] as const)("an idle %s turn preserves queued text, explains its exact guard, and allows checked Send now recovery", async reason => {
+    const tab = await createTab();
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    const id = await enqueue(tab, "Saved follow-up that requires a checked recovery");
+    const native = simulateNativeChat(tab);
+    const initialAnswer = tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!;
+    if (reason === "completion-unverified") initialAnswer.querySelector(".turn-action-controls")!.remove();
+    else if (reason === "anchor-missing") tab.doc.querySelector("article[data-chatgpt-search-message-ids]")!.remove();
+    else initialAnswer.remove();
+    busy(tab, false);
+    await poll(tab);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueCompletionReason).toBe(reason);
+    expect(host.dataset.queueState).toBe("completion-pending");
+    expect(tab.shadow.querySelector("li .status")?.textContent).toContain("Your message is saved; check the chat, then use Send now to continue.");
+    expect(Object.values(host.dataset).join(" ")).not.toContain("Saved follow-up");
+    expect(native.sent).toEqual([]);
+    expect((await persisted()).items.map(item => [item.id, item.status, item.text])).toEqual([[id, "queued", "Saved follow-up that requires a checked recovery"]]);
+    expect(tab.requests.filter(request => request.action === "claim" || request.action === "attempt")).toHaveLength(0);
+    // Refreshing alone never guesses completion or retries delivery.
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    button(tab, "steer", id).click();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "explicit checked recovery acknowledged");
+    expect(native.sent).toEqual(["Saved follow-up that requires a checked recovery"]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+    expect(tab.shadow.querySelector(`li[data-id='${id}']`)).toBeNull();
+  });
+
+  test.each(["visible", "hidden"] as const)("an older batch resumes after later native turns complete while %s and drains exactly once", async visibility => {
+    const tab = await createTab({ visibility });
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    const initialAnswer = currentChatGptResponse(tab.doc, "complete", "initial-assistant");
+    tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!.replaceWith(initialAnswer);
+    initialAnswer.prepend(tab.doc.querySelector("article[data-chatgpt-search-message-ids]")!);
+    const first = await enqueue(tab, "First saved item after native follow-ups");
+    const second = await enqueue(tab, "Second saved item in the same batch");
+    const native = simulateCurrentNativeChat(tab);
+    for (const state of ["complete", "unknown"]) {
+      postUserBubble(tab, `An intervening native request (${state})`);
+      const turn = currentChatGptResponse(tab.doc, state);
+      turn.prepend(tab.doc.querySelector("main")!.lastElementChild!);
+      tab.doc.querySelector("main")!.append(turn);
+    }
+    busy(tab, false);
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueCompletionReason).toBe("completion-unverified");
+    tab.doc.querySelector("main")!.lastElementChild!.setAttribute("data-talvt-turn-state", "complete");
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "later native completion releases the older batch", 500);
+    expect((await persisted()).lastCompletedUserMessageId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(tab.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+    expect(tab.shadow.querySelector(`li[data-id='${second}']`)).not.toBeNull();
+    busy(tab, false);
+    await poll(tab);
+    expect(native.sent).toHaveLength(1);
+    native.finish();
+    await waitFor(() => native.sent.length === 2 && !tab.queue.dispatching, "next saved item follows its own response", 500);
+    busy(tab, false);
+    native.finish();
+    await waitFor(() => tab.queue.state?.items.length === 0, "older batch fully drained", 500);
+    await poll(tab);
+    expect(native.sent).toEqual(["First saved item after native follow-ups", "Second saved item in the same batch"]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([first, second]);
+  });
+
+  test.each(["stop", "streaming", "older-turn"] as const)("a complete native toolbar cannot release the queue through a conflicting %s guard", async guard => {
+    const tab = await createTab({ visibility: "hidden" });
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    const initialAnswer = currentChatGptResponse(tab.doc, "complete", "initial-assistant");
+    tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!.replaceWith(initialAnswer);
+    initialAnswer.prepend(tab.doc.querySelector("article[data-chatgpt-search-message-ids]")!);
+    const id = await enqueue(tab, "Hold despite a completed toolbar");
+    const native = simulateCurrentNativeChat(tab);
+    let later: HTMLElement | null = null;
+    if (guard === "streaming") initialAnswer.querySelector("[data-markdown-text-style='assistant-message']")!.setAttribute("data-is-streaming", "true");
+    if (guard === "older-turn") {
+      postUserBubble(tab, "A more recent native user turn");
+      later = currentChatGptResponse(tab.doc, "unknown");
+      later.prepend(tab.doc.querySelector("main")!.lastElementChild!);
+      tab.doc.querySelector("main")!.append(later);
+    }
+    if (guard !== "stop") busy(tab, false);
+    await poll(tab);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueCompletionReason).toBe(guard === "older-turn" ? "completion-unverified" : "busy");
+    expect(native.sent).toEqual([]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
+    if (guard === "older-turn") {
+      expect(tab.shadow.querySelector("li .status")?.textContent).toContain("could not be verified");
+      await poll(tab);
+      expect(native.sent).toEqual([]);
+      later!.setAttribute("data-talvt-turn-state", "complete");
+      await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "latest turn completion releases the older anchor", 500);
+      expect(native.sent).toEqual(["Hold despite a completed toolbar"]);
+      expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
+      expect(tab.shadow.querySelector(`li[data-id='${id}']`)).toBeNull();
+    } else {
+      if (guard === "streaming") initialAnswer.querySelector("[data-is-streaming]")!.removeAttribute("data-is-streaming");
+      else busy(tab, false);
+      await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "exact completion after the conflict clears", 500);
+      expect(native.sent).toEqual(["Hold despite a completed toolbar"]);
+      expect(tab.shadow.querySelector(`li[data-id='${id}']`)).toBeNull();
+    }
+  });
+
+  test("identity and loading holds remain specific before an idle completion recovery", async () => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Keep this attached to the verified conversation");
+    tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant'] .turn-action-controls")!.remove();
+    const native = simulateNativeChat(tab);
+    const main = tab.doc.querySelector("main")!;
+    main.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    busy(tab, false);
+    await poll(tab);
+    const host = tab.doc.getElementById("plannotator-message-queue")!;
+    expect(host.dataset.queueState).toBe("identity-unverified");
+    expect(host.dataset.queueCompletionReason).toBe("identity-unverified");
+    expect(tab.shadow.querySelector("li .status")?.textContent).toContain("not linked to this saved chat");
+    expect(tab.shadow.querySelector("li .status")?.textContent).not.toContain("Send now");
+    main.setAttribute("aria-busy", "true");
+    await poll(tab);
+    expect(host.dataset.queueCompletionReason).toBe("conversation-loading");
+    expect(native.sent).toEqual([]);
+    expect((await persisted()).items.map(item => [item.id, item.status])).toEqual([[id, "queued"]]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+  });
+
+  test.each(["before-commit", "lost-reply"] as const)("a completion transport failure %s preserves delivery and a checked recovery drains only the next item", async failure => {
+    const tab = await createTab();
+    const first = await enqueue(tab, "First item that was already delivered");
+    const second = await enqueue(tab, "Second item waits for completion storage");
+    const native = simulateNativeChat(tab);
+    busy(tab, false);
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "first delivery confirmed");
+    let failed = false;
+    let unavailable = true;
+    const failCompletion = (request: QueueRequest) => {
+      if (request.action === "complete" && unavailable) { failed = true; throw new Error("Completion storage unavailable"); }
+    };
+    if (failure === "before-commit") tab.before = failCompletion;
+    else tab.after = failCompletion;
+    native.finish();
+    await waitFor(() => failed && !tab.queue.polling && !tab.queue.dispatching, "completion transport failure preserved");
+    expect(native.sent.filter(text => text === "First item that was already delivered")).toHaveLength(1);
+    if (failure === "before-commit") {
+      expect((await persisted()).items.find(item => item.id === first)?.status).toBe("waiting");
+      expect((await persisted()).items.find(item => item.id === second)?.status).toBe("queued");
+      expect(tab.shadow.textContent).toContain("Completion storage unavailable");
+      unavailable = false;
+      button(tab, "check").click();
+    }
+    await waitFor(() => native.sent.length === 2 && !tab.queue.dispatching, "only the next item recovered");
+    expect(native.sent).toEqual(["First item that was already delivered", "Second item waits for completion storage"]);
+    expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([first, second]);
+    expect(tab.shadow.querySelector(".error")).toBeNull();
+    expect(tab.shadow.querySelector("[data-action='retry']")).toBeNull();
+    expect(tab.shadow.querySelectorAll("li[data-id]")).toHaveLength(0);
+  });
+
   test.each(["visible", "hidden"] as const)("completion mutations in a %s tab dispatch each next message despite a fresh busy heartbeat", async state => {
     const tab = await createTab({ visibility: state });
     const initialAnswer = tab.doc.querySelector("article[data-chatgpt-selection-message-id='initial-assistant']")!;
@@ -1936,7 +2180,8 @@ describe("Persistent message queue UI", () => {
     expect(host.dataset.queueRouteReady).toBe("true");
     expect(host.dataset.queueHasAnchor).toBe("true");
     expect(host.dataset.queueVisibility).toBe(state);
-    expect(tab.shadow.querySelector("li .status")?.textContent).toBe("Waiting for ChatGPT to confirm this response finished.");
+    expect(host.dataset.queueCompletionReason).toBe("completion-unverified");
+    expect(tab.shadow.querySelector("li .status")?.textContent).toBe("This response's completion could not be verified. Your message is saved; check the chat, then use Send now to continue.");
     expect(tab.shadow.querySelectorAll("li .status")).toHaveLength(1);
     expect(Object.values(host.dataset).join(" ")).not.toContain("First prompt after completion");
 

@@ -1,6 +1,6 @@
-# Store listing draft
+# Store listing
 
-Status: Threadlane **0.3.6 is published and publicly available**, verified on October 7, 2026. Update **0.3.11 is pending review** with automatic publication after approval. Its listing was resubmitted on October 7 with the supplied flame icon, matching promotional tile, and all three ChatGPT, Claude, and Gemini screenshots; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md). The description below matches the submitted listing. The newer update and artwork are not yet confirmed public.
+Status: **0.3.15 was submitted successfully and is Pending review**, revision `00008`, confirmed October 23, 2026 at 04:42 UTC (October 22 at 21:42 PDT). The published version remains **0.3.12**. Automatic publication after approval is enabled; Public visibility, free pricing, and all regions were verified. The description below includes successful-insertion reply cleanup. See [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) for submission and publication evidence.
 
 ## Name
 
@@ -17,7 +17,7 @@ Keep your feedback next to the passage it refers to, and prepare follow-up messa
 Threadlane works inside ChatGPT, Claude, and Gemini:
 
 - Select part of an assistant response, add a note, and return to the highlight later.
-- Insert a revision prompt built from your notes into the native composer. Your saved notes remain available until you delete them.
+- Insert a revision prompt built from your notes into the native composer. Successfully inserted notes clear from the reply batch so your next reply starts fresh; blocked or failed insertion keeps them saved.
 - Queue text follow-ups while a response is running. The next message sends after the previous response finishes and the composer is ready.
 - Drag to reorder, edit a message in its original queue slot, remove it, pause/resume the queue, or use Send now to interrupt the current response and send a selected message.
 - Keep saved notes and queues across tabs, page reloads, and browser restarts in the same Chrome profile.
@@ -35,6 +35,6 @@ Threadlane is an independent extension and is not affiliated with or endorsed by
 - Visibility: **Public**, as authorized by the user. Complete the gates in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 - Publisher/support contact: **threadlane.support@gmail.com**.
 - Store icon: `assets/icons/128.png`, derived from the [supplied flame artwork](../assets/icons/README.md); matching promotional tile: `store/assets/promo-small.png`.
-- Privacy policy URL: [https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf). Hosted policy was checked live; packaged `privacy.html` is the offline copy.
+- Privacy policy URL: [https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf](https://gist.github.com/ahmed-ela/5ce1f17c643c3daaa4bc983e7b0a81bf). Hosted policy was updated for 0.3.15 and read back with exact content parity; packaged `privacy.html` is the offline copy.
 - Support email: [threadlane.support@gmail.com](mailto:threadlane.support@gmail.com). A separate homepage/support website is optional and has not been provided.
 - Screenshot assets: use the ordered [ChatGPT, Claude, and Gemini demo images](assets/screenshots/README.md), each a 1280×800 JPEG showing a harmless herb conversation with two paused follow-ups. Their capture versions, provenance, and hashes are recorded alongside the files. Do not use private chat content or imply a feature that is absent.

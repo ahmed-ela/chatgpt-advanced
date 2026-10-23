@@ -91,6 +91,32 @@ describe("durable annotation storage", () => {
     expect((await read(newStore())).notes).toEqual([]);
   });
 
+  test("consuming an exact transferred snapshot is durable and idempotent", async () => {
+    await save([note("sent"), note("untouched")]);
+    const consume = request("consume", { notes: [note("sent")] });
+    expect(await store.apply(consume)).toMatchObject({ notes: [note("untouched")], revision: 2, changed: true });
+    expect(await store.apply(consume)).toMatchObject({ notes: [note("untouched")], revision: 2, changed: false });
+    await store.close();
+    expect((await read(newStore())).notes).toEqual([note("untouched")]);
+    await expect(save([note("sent")], newStore())).rejects.toThrow("removed in another tab");
+  });
+
+  test.each(["comment", "quote", "messageId", "contextBefore", "contextAfter", "messageExcerpt", "startOffset", "endOffset", "createdAt"] as const)("consumption keeps a newer %s revision that was not transferred", async field => {
+    const old = note();
+    const newer = { ...old, [field]: typeof old[field] === "number" ? Number(old[field]) + 1 : `${old[field]} changed` };
+    await save([newer]);
+    expect(await store.apply(request("consume", { notes: [old] }))).toMatchObject({ notes: [newer], revision: 1, changed: false });
+    await save([{ ...newer, comment: "Still editable after a mismatched consume" }]);
+    expect((await read()).notes[0]?.comment).toBe("Still editable after a mismatched consume");
+  });
+
+  test("consuming a not-yet-saved snapshot prevents stale writes from resurrecting it", async () => {
+    const expected = note("pending-snapshot");
+    expect((await store.apply(request("consume", { notes: [expected] }))).notes).toEqual([]);
+    await expect(save([expected])).rejects.toThrow("removed in another tab");
+    expect((await store.apply(request("import", { notes: [expected] }))).notes).toEqual([]);
+  });
+
   test("legacy import merges missing notes while keeping saved edits and deletions", async () => {
     await save([note("existing", { comment: "new extension edit" }), note("deleted")]);
     await store.apply(request("remove", { ids: ["deleted"] }));

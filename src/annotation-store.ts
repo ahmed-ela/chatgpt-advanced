@@ -23,12 +23,18 @@ export interface PersistedNoteItem {
 export interface AnnotationRequest {
   type: typeof ANNOTATION_MESSAGE_TYPE;
   key: string;
-  action: "read" | "upsert" | "remove" | "import";
+  action: "read" | "upsert" | "remove" | "import" | "consume";
   notes?: PersistedNoteItem[];
   ids?: string[];
 }
 export type AnnotationResponse = { ok: true; notes: PersistedNoteItem[]; revision: number } | { ok: false; error: string };
 export interface AnnotationResult { notes: PersistedNoteItem[]; revision: number; changed: boolean }
+
+/** Compare the exact transferred revision, including its selection identity. */
+export function sameAnnotationNote(left: PersistedNoteItem | undefined, right: PersistedNoteItem): boolean {
+  return Boolean(left && (["id", "messageId", "messageExcerpt", "quote", "comment", "contextBefore", "contextAfter", "startOffset", "endOffset", "createdAt"] as const)
+    .every(field => left[field] === right[field]));
+}
 interface StoredAnnotations {
   key: string;
   revision: number;
@@ -84,7 +90,7 @@ function validId(id: unknown): id is string {
 
 function validateRequest(request: AnnotationRequest): AnnotationRequest {
   if (!request || request.type !== ANNOTATION_MESSAGE_TYPE || typeof request.key !== "string" || request.key.length > 2_048 || !/^(chatgpt|claude|gemini|fixture):.+$/.test(request.key)) throw new Error("Invalid annotation conversation");
-  if (!["read", "upsert", "remove", "import"].includes(request.action)) throw new Error("Unknown annotation action");
+  if (!["read", "upsert", "remove", "import", "consume"].includes(request.action)) throw new Error("Unknown annotation action");
   if (request.action === "read") return { type: request.type, key: request.key, action: request.action };
   if (request.action === "remove") {
     if (!Array.isArray(request.ids) || request.ids.length > ANNOTATION_MAX_NOTES || !request.ids.every(validId)) throw new Error("Invalid annotation IDs");
@@ -116,15 +122,19 @@ function cleanNote(note: PersistedNoteItem): PersistedNoteItem {
 
 function mutate(state: StoredAnnotations, request: AnnotationRequest, now: number): void {
   if (request.action === "read") return;
+  if (request.action === "consume") {
+    for (const expected of request.notes!) {
+      const current = state.notes.find(note => note.id === expected.id);
+      // Another tab's newer edit was not part of this transferred prompt.
+      if (current && !sameAnnotationNote(current, expected)) continue;
+      retireAnnotation(state, expected.id, expected.createdAt);
+    }
+    return;
+  }
   if (request.action === "remove") {
     for (const id of request.ids!) {
       const note = state.notes.find(entry => entry.id === id);
-      state.notes = state.notes.filter(entry => entry.id !== id);
-      if (!state.tombstones.some(entry => entry.id === id)) state.tombstones.push({ id, createdAt: note?.createdAt ?? now });
-    }
-    while (state.tombstones.length > ANNOTATION_MAX_TOMBSTONES) {
-      const retired = state.tombstones.shift()!;
-      state.retiredBefore = Math.max(state.retiredBefore ?? 0, retired.createdAt);
+      retireAnnotation(state, id, note?.createdAt ?? now);
     }
     return;
   }
@@ -139,5 +149,14 @@ function mutate(state: StoredAnnotations, request: AnnotationRequest, now: numbe
     }
     if (index < 0) state.notes.push(note);
     else state.notes[index] = note;
+  }
+}
+
+function retireAnnotation(state: StoredAnnotations, id: string, createdAt: number): void {
+  state.notes = state.notes.filter(entry => entry.id !== id);
+  if (!state.tombstones.some(entry => entry.id === id)) state.tombstones.push({ id, createdAt });
+  while (state.tombstones.length > ANNOTATION_MAX_TOMBSTONES) {
+    const retired = state.tombstones.shift()!;
+    state.retiredBefore = Math.max(state.retiredBefore ?? 0, retired.createdAt);
   }
 }

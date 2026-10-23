@@ -199,13 +199,32 @@ function hasLoadingState(): boolean {
   )).some(isVisible);
 }
 
-export function isChatBusy(): boolean {
+function hasUnfinishedChatGptTurn(): boolean {
+  if (currentProvider() !== "chatgpt") return false;
+  // A responding turn may have an unidentified draft body while its existing
+  // transcript identity is ready. Keep generation separate from route loading
+  // so an explicit Send now can still stop that response safely.
+  if (Array.from(document.querySelectorAll<HTMLElement>(ASSISTANT_SELECTOR))
+    .some(body => isVisible(body) && !messageId(body))) return true;
+  if (Array.from(document.querySelectorAll("[data-talvt-turn-state]"))
+    .some(turn => isVisible(turn) && /^(?:streaming|responding|thinking|pending|loading|in-progress|busy)$/.test(turn.getAttribute("data-talvt-turn-state") ?? ""))) return true;
+  return Array.from(document.querySelectorAll("[data-talvt-turn-state][aria-busy='true'], [data-talvt-turn-state] [aria-busy='true']")).some(isVisible);
+}
+
+function hasGenerationStopControl(): boolean {
   const scope = composerScope();
   if (scope && Array.from(scope.querySelectorAll("button")).some((button) => isVisible(button) && isStopControl(button))) return true;
   // The stable stop testid is safe outside a known wrapper; a generic Pause
   // label elsewhere can belong to read-aloud playback and must not queue sends.
   if (Array.from(document.querySelectorAll("button[data-testid='stop-button']")).some(isVisible)) return true;
-  if (hasLoadingState()) return true;
+  return false;
+}
+
+export function isChatBusy(): boolean {
+  return hasGenerationStopControl() || hasLoadingState() || hasUnfinishedChatGptTurn() || hasUncommittedAnimation();
+}
+
+function hasUncommittedAnimation(currentMessages?: MessageRecord[] | null): boolean {
   // Live streaming bodies do not receive their final message ID until the
   // generation is committed. A completed turn can retain a separate animated
   // thinking body, so reconcile that body with positive same-turn evidence.
@@ -214,7 +233,7 @@ export function isChatBusy(): boolean {
   );
   if (!uncommitted.length) return false;
   if (currentProvider() !== "chatgpt") return true;
-  const messages = currentConversationMessages();
+  const messages = currentMessages === undefined ? currentConversationMessages() : currentMessages;
   const latest = messages?.at(-1);
   if (!messages || latest?.role !== "assistant") return true;
   const latestUser = [...messages].reverse().find((message) => message.role === "user");
@@ -442,23 +461,62 @@ export function getStableUserMessageAnchor(userId: string): string | null {
   return turn && /^[0-9a-f]{16}$/i.test(turn.id) ? `gemini:user:${turn.id}` : null;
 }
 
-/** Absence of a stop button alone is not proof of an assistant's completion. */
-export function getAssistantCompletionAfter(userId: string): boolean {
-  if (isChatBusy()) return false;
-  const messages = currentConversationMessages();
-  if (!messages) return false;
+export type AssistantCompletionStatus = "complete" | "busy" | "conversation-loading" | "identity-unverified" |
+  "anchor-missing" | "assistant-missing" | "completion-unverified";
+
+/** Fresh, content-free reasons for a held queue. No timer or missing Stop proves completion. */
+export function getAssistantCompletionStatusAfter(userId: string): AssistantCompletionStatus {
+  // A transcript replacement is distinct from response generation. Both keep
+  // the queue held, but need different recovery guidance.
+  if (currentProvider() === "chatgpt" && Array.from(document.querySelectorAll(
+    "main[aria-busy='true'], [role='main'][aria-busy='true'], [data-testid='conversation-loading'], [data-testid='conversation-loading-spinner']",
+  )).some(isVisible)) return "conversation-loading";
+  if (hasGenerationStopControl() || hasLoadingState() || hasUnfinishedChatGptTurn()) return "busy";
+  const state = currentConversationState();
+  if (state.status !== "ready") return state.status === "identity-unverified" ? "identity-unverified" : "conversation-loading";
+  const messages = state.messages;
+  // Reuse this synchronous transcript snapshot. A second scan could disagree
+  // during a DOM replacement and needlessly clones long assistant replies.
+  if (hasUncommittedAnimation(messages)) return "busy";
   const userIndex = messages.findIndex((message) => message.role === "user" && (message.id === userId ||
     // Preserve queue anchors written before Gemini's immediate prompt IDs were used.
     (currentProvider() === "gemini" && userId === `gemini:user:${message.element.closest('.conversation-container[id]')?.id}`)));
-  if (userIndex < 0) return false;
+  if (userIndex < 0) return "anchor-missing";
+  let completionUserIndex = userIndex;
+  if (currentProvider() === "chatgpt" && messages.slice(userIndex + 1).some(message => message.role === "user")) {
+    // Native follow-ups can advance the transcript while a saved batch keeps
+    // its original anchor. Keep that durable anchor, but require a complete,
+    // unambiguous chain through the latest turn before releasing the batch.
+    // Merely finding a newer user (or an old toolbar) proves nothing.
+    const visibleBodies = Array.from(document.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR)).filter(isVisible);
+    const uniqueBody = (message: MessageRecord): boolean => visibleBodies.every(element =>
+      messageId(element) !== message.id || element.contains(message.element) || message.element.contains(element));
+    for (let index = userIndex + 1; index < messages.length; index++) {
+      if (messages[index]!.role !== "user") continue;
+      const previousUser = messages[completionUserIndex]!;
+      const previousAssistant = messages[index - 1];
+      if (!uniqueBody(previousUser) || previousAssistant?.role !== "assistant" || !uniqueBody(previousAssistant) ||
+          !chatGptCompletionContainer(previousAssistant, previousUser.id, messages)) return "completion-unverified";
+      completionUserIndex = index;
+    }
+    const latestUser = messages[completionUserIndex]!;
+    const latestAssistant = messages.at(-1);
+    if (!uniqueBody(latestUser) || latestAssistant?.role !== "assistant" || !uniqueBody(latestAssistant)) return "completion-unverified";
+  }
   let assistant: MessageRecord | undefined;
-  for (const message of messages.slice(userIndex + 1)) {
+  for (const message of messages.slice(completionUserIndex + 1)) {
     if (message.role === "user") break;
     assistant = message;
   }
-  if (!assistant) return false;
-  if (currentProvider() !== "chatgpt") return providerCompletion(assistant, isVisible);
-  return chatGptCompletionContainer(assistant, userId, messages) !== null;
+  if (!assistant) return "assistant-missing";
+  const complete = currentProvider() !== "chatgpt" ? providerCompletion(assistant, isVisible) :
+    chatGptCompletionContainer(assistant, messages[completionUserIndex]!.id, messages) !== null;
+  return complete ? "complete" : "completion-unverified";
+}
+
+/** Preserve callers that only need the positive completion decision. */
+export function getAssistantCompletionAfter(userId: string): boolean {
+  return getAssistantCompletionStatusAfter(userId) === "complete";
 }
 
 function chatGptCompletionContainer(assistant: MessageRecord, userId: string, messages: MessageRecord[], alongside?: HTMLElement): HTMLElement | null {
@@ -469,7 +527,19 @@ function chatGptCompletionContainer(assistant: MessageRecord, userId: string, me
     if (container === document.body || container.matches("main, [role='main']")) break;
     const containedMessages = messages.filter((message) => container!.contains(message.element));
     if (containedMessages.some((message) => message.role === "user" ? message.id !== userId : message.id !== assistant.id)) break;
+    const user = messages.find(message => message.role === "user" && message.id === userId);
+    // The transcript deduplicates nested role markers, but distinct visible
+    // bodies with a repeated ID or no committed ID must not share completion.
+    const scopedBodies = [container, ...Array.from(container.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR))]
+      .filter(element => element.matches(MESSAGE_SELECTOR) && isVisible(element));
+    if (scopedBodies.some(element => {
+      const expected = element.matches(USER_SELECTOR) ? user : assistant;
+      return !expected || messageId(element) !== expected.id ||
+        !(element.contains(expected.element) || expected.element.contains(element));
+    })) break;
     if (alongside && !container.contains(alongside)) continue;
+    const turnState = container.closest("[data-talvt-turn-state]")?.getAttribute("data-talvt-turn-state");
+    if (turnState !== undefined && turnState !== null && turnState !== "complete") return null;
     const controls = Array.from(container.querySelectorAll("button")).filter(isVisible);
     if (controls.some((button) => /^(?:copy-turn-action-button|good-response-turn-action-button|bad-response-turn-action-button)$/.test(button.getAttribute("data-testid") ?? ""))) return container;
     // A code-block Copy button is never completion proof. Require the current
@@ -477,6 +547,12 @@ function chatGptCompletionContainer(assistant: MessageRecord, userId: string, me
     const labels = controls.filter((button) => !button.closest(ASSISTANT_SELECTOR))
       .map((button) => (button.getAttribute("aria-label") ?? "").trim().toLowerCase());
     if (labels.includes("rate response") && (labels.includes("copy") || labels.includes("copy response"))) return container;
+    // Current ChatGPT has no testids or rating control. Require the explicit
+    // completed turn AND its external response actions, in the bounded parent
+    // containing this exact user and committed assistant. Either alone can be
+    // optimistic/stale UI; page-wide status text can belong to another turn.
+    if (container.getAttribute("data-talvt-turn-state") === "complete" && user && container.contains(user.element) &&
+        labels.includes("regenerate response") && (labels.includes("copy") || labels.includes("copy response"))) return container;
   }
   return null;
 }

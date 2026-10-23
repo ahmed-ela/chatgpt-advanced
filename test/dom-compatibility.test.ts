@@ -419,7 +419,7 @@ for (const fixture of providerFixtures) {
       while (!helpers.getComposerText(helpers.findComposer()!).includes("Explain how the moon affects tides.") && Date.now() < insertedDeadline) await Bun.sleep(10);
       expect(helpers.getComposerText(helpers.findComposer()!)).toContain("Explain how the moon affects tides.");
       expect(helpers.getComposerText(helpers.findComposer()!)).toContain("reflects sunlight");
-      expect(helpers.getOrderedNotes()).toHaveLength(1);
+      expect(helpers.getOrderedNotes()).toHaveLength(0);
     });
   });
 }

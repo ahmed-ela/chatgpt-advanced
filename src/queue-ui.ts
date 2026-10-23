@@ -5,7 +5,7 @@ import { NativeReplayGuard } from "./native-replay-guard";
 import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages,
-  getAssistantCompletionAfter, getStableUserMessageAnchor, isCurrentConversationReady, getCurrentConversationReadiness,
+  getAssistantCompletionStatusAfter, type AssistantCompletionStatus, getStableUserMessageAnchor, isCurrentConversationReady, getCurrentConversationReadiness,
   registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias,
   isEmptyNewChat, composerScope, getProviderName,
 } from "./chatgpt-dom";
@@ -14,6 +14,7 @@ type QueueRuntime = Pick<ExtensionRuntime, "sendMessage" | "onMessage">;
 type QueueHold = "loading" | "empty" | "paused" | "retry-delay" | "editing" | "saving" | "reordering" |
   "review" | "sending" | "claimed" | "waiting" | "composer-missing" | "draft" | "attachments" |
   "chat-busy" | "anchor-unverified" | "identity-unverified" | "completion-pending" | "transcript-loading" | "ready";
+type QueueCompletionReason = AssistantCompletionStatus | "anchor-unverified" | "not-required";
 
 const ROOT = "plannotator-message-queue";
 const POLL_MS = 900;
@@ -231,7 +232,7 @@ export class MessageQueue {
     });
     this.observer.observe(document.body, {
       childList: true, characterData: true, subtree: true, attributes: true,
-      attributeFilter: ["aria-label", "title", "disabled", "aria-disabled", "hidden", "aria-hidden", "class", "data-testid", "data-is-streaming", "data-perf-row-streaming", "aria-busy", "data-status", "data-chatgpt-selection-conversation-id", "data-chatgpt-selection-message-id", "data-chatgpt-search-message-ids"],
+      attributeFilter: ["aria-label", "title", "disabled", "aria-disabled", "hidden", "aria-hidden", "class", "data-testid", "data-is-streaming", "data-perf-row-streaming", "aria-busy", "data-status", "data-talvt-turn-state", "data-chatgpt-selection-conversation-id", "data-chatgpt-selection-message-id", "data-chatgpt-search-message-ids"],
     });
     this.pollTimer = window.setInterval(() => { void this.tick(); }, POLL_MS);
     void this.tick();
@@ -410,7 +411,7 @@ export class MessageQueue {
             item = updated;
           }
         }
-        if (item.status === "waiting" && item.userMessageId && this.canUseAnchor(item.userMessageId) && !busy && getAssistantCompletionAfter(item.userMessageId)) {
+        if (item.status === "waiting" && item.userMessageId && this.canUseAnchor(item.userMessageId) && !busy && getAssistantCompletionStatusAfter(item.userMessageId) === "complete") {
           await this.request("complete", { id: item.id, userMessageId: item.userMessageId }, key);
         }
       }
@@ -495,7 +496,7 @@ export class MessageQueue {
   }
 
   /** Explain the same guards used for dispatch; never relax them for a status. */
-  private dispatchHold(composer = findQueueComposer()): QueueHold {
+  private dispatchHold(composer = findQueueComposer(), completionReason?: QueueCompletionReason): QueueHold {
     if (!this.state) return "loading";
     if (!this.state.items.length) return "empty";
     if (this.state.paused) return "paused";
@@ -516,7 +517,9 @@ export class MessageQueue {
     if (isChatBusy()) return "chat-busy";
     const anchor = this.state.lastCompletedUserMessageId;
     if (anchor && !this.canUseAnchor(anchor)) return "anchor-unverified";
-    if (!this.transcriptReady()) {
+    // render() may reuse its synchronous diagnostic snapshot. Authorization
+    // outside that render still asks the adapter for fresh completion proof.
+    if (!(anchor && completionReason ? completionReason === "complete" : this.transcriptReady())) {
       if (getCurrentConversationReadiness() === "identity-unverified") return "identity-unverified";
       return anchor ? "completion-pending" : "transcript-loading";
     }
@@ -525,8 +528,17 @@ export class MessageQueue {
 
   private transcriptReady(): boolean {
     return this.state?.lastCompletedUserMessageId
-      ? this.canUseAnchor(this.state.lastCompletedUserMessageId) && getAssistantCompletionAfter(this.state.lastCompletedUserMessageId)
+      ? this.canUseAnchor(this.state.lastCompletedUserMessageId) && getAssistantCompletionStatusAfter(this.state.lastCompletedUserMessageId) === "complete"
       : isCurrentConversationReady();
+  }
+
+  /** Diagnostic only: the exact outstanding turn still controls dispatch. */
+  private completionReason(): QueueCompletionReason {
+    if (!this.state?.items.length) return "not-required";
+    const anchor = this.state?.items.find(item => item.status === "waiting")?.userMessageId ?? this.state?.lastCompletedUserMessageId;
+    if (!anchor) return "not-required";
+    if (!this.canUseAnchor(anchor)) return "anchor-unverified";
+    return getAssistantCompletionStatusAfter(anchor);
   }
 
   private canUseAnchor(userId: string): boolean {
@@ -866,7 +878,8 @@ export class MessageQueue {
     const draft = composer ? readComposer(composer).trim() : "";
     if (composer && !draft && !hasComposerAttachments() && [SEND_DRAFT_WARNING, EDIT_DRAFT_WARNING].includes(this.error)) this.error = "";
     const busy = isChatBusy();
-    const hold = this.dispatchHold(composer);
+    const completionReason = this.completionReason();
+    const hold = this.dispatchHold(composer, completionReason);
     // DOM-only diagnostics make a stalled queue inspectable without exposing
     // message content, conversation IDs, ownership tokens, or stored drafts.
     const routeReady = Boolean(this.key && getQueueKey(location.href) === this.key);
@@ -884,6 +897,7 @@ export class MessageQueue {
     this.host.dataset.queueVisibility = document.visibilityState;
     this.host.dataset.queueIdentitySource = getVerifiedConversationAlias() ? this.identitySource ?? "native-first-send" :
       getCurrentConversationReadiness() === "ready" ? "provider" : "unverified";
+    this.host.dataset.queueCompletionReason = completionReason;
     const showAdd = Boolean(draft && (busy || allItems.length || this.state?.paused));
     const unknownAnchor = Boolean(this.state?.lastCompletedUserMessageId && !this.canUseAnchor(this.state.lastCompletedUserMessageId)) ||
       allItems.some(item => item.status === "waiting" && item.userMessageId && !this.canUseAnchor(item.userMessageId));
@@ -898,7 +912,15 @@ export class MessageQueue {
       hold === "attachments" ? "Send or remove your attachment to continue." :
       hold === "identity-unverified" ? "ChatGPT's temporary conversation ID is not linked to this saved chat. Reopen this conversation to reconnect the queue." :
       !busy && (hold === "completion-pending" || hold === "waiting")
-        ? `Waiting for ${getProviderName()} to confirm this response finished.` :
+        ? completionReason === "completion-unverified"
+          ? "This response's completion could not be verified. Your message is saved; check the chat, then use Send now to continue."
+          : completionReason === "anchor-missing"
+            ? "The queue's previous message is not visible in this chat. Your message is saved; check the chat, then use Send now to continue."
+            : completionReason === "assistant-missing"
+              ? "The response to the queue's previous message is not visible. Your message is saved; check the chat, then use Send now to continue."
+              : completionReason === "conversation-loading"
+                ? "Waiting for this conversation to finish loading."
+                : completionReason === "busy" ? `${getProviderName()} is still finishing this response.` : "" :
       hold === "transcript-loading" ? "Waiting for this conversation to finish loading." : "";
     if (!this.key || !composer || (!items.length && !showAdd && !this.error && !this.state?.paused)) {
       this.host.style.display = "none";

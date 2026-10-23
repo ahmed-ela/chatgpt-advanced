@@ -4,7 +4,7 @@ import {
 } from "./chatgpt-dom";
 import { icon } from "./icons";
 import { getExtensionApi, type ExtensionRuntime } from "./browser-api";
-import { ANNOTATION_MESSAGE_TYPE, ANNOTATION_CHANGED_TYPE, getAnnotationKey } from "./annotation-store";
+import { ANNOTATION_MESSAGE_TYPE, ANNOTATION_CHANGED_TYPE, getAnnotationKey, sameAnnotationNote } from "./annotation-store";
 
 type ComposerElement = HTMLTextAreaElement | HTMLElement;
 type NoteSide = "left" | "right";
@@ -93,7 +93,9 @@ const state = {
   actionError: "",
 };
 
-type NoteMutation = { action: "upsert"; note: PersistedNoteItem } | { action: "remove"; id: string };
+type NoteUpsert = { action: "upsert"; note: PersistedNoteItem };
+type NoteMutation = NoteUpsert | { action: "remove"; id: string } |
+  { action: "consume"; note: PersistedNoteItem; before?: NoteUpsert };
 interface AnnotationSession {
   route: string;
   key: string | null;
@@ -900,7 +902,7 @@ function renderActions(ui: UiRefs): void {
 function renderNotesMenu(): string {
   return `
     <section class="notes-menu" aria-label="Saved notes">
-      <p class="notes-help">Saved notes remain until you delete them.</p>
+      <p class="notes-help">Notes clear after they are inserted into your message.</p>
       ${allConversationNotes().map((note, index) => `
         <div class="notes-menu-item" data-note-id="${escapeHtml(note.id)}">
         <button
@@ -1199,12 +1201,12 @@ function clearAllNotes(): void {
   void flushPersistedConversationState();
 }
 
-function buildPrompt(): string {
-  if (state.notes.length === 0) {
+function buildPrompt(notes: Array<Pick<NoteItem, "comment" | "quote">> = getOrderedNotes()): string {
+  if (notes.length === 0) {
     return "Select assistant text and add at least one note.";
   }
 
-  return getOrderedNotes()
+  return notes
     .map((note) => [
       `user: ${formatPromptValue(note.comment)}`,
       `responding to AI selected text: ${formatPromptValue(note.quote)}`,
@@ -1232,7 +1234,12 @@ async function insertPrompt(ui: UiRefs): Promise<void> {
   }
 
   const route = getConversationStorageKey();
-  const prompt = buildPrompt();
+  const session = currentAnnotationSession();
+  const displayedNotes = getOrderedNotes();
+  // Restoring a selection can repair its message ID, quote or offsets in the
+  // UI. Consume the original persisted record, not that repaired projection.
+  const insertedNotes = displayedNotes.map(note => session.notes.get(note.id)).filter((note): note is PersistedNoteItem => Boolean(note));
+  const prompt = buildPrompt(displayedNotes);
   state.actionError = "";
   clearActionFeedback();
   state.actionFeedback = "loading";
@@ -1251,6 +1258,15 @@ async function insertPrompt(ui: UiRefs): Promise<void> {
     render(ui);
     return;
   }
+  for (const note of insertedNotes) {
+    // The prompt is a snapshot. Keep additions and edits made while insertion
+    // awaited the composer, and never consume notes that were not included.
+    if (sameAnnotationNote(session.notes.get(note.id), note)) queueAnnotationMutation({ action: "consume", note });
+  }
+  if (state.activeNoteId && !session.notes.has(state.activeNoteId)) state.activeNoteId = null;
+  if (!session.notes.size) state.notesMenuOpen = false;
+  applyAnnotationSession(session);
+  void flushAnnotationSession(session);
   showInsertSuccess(ui);
   render(ui);
 }
@@ -1390,6 +1406,9 @@ function acceptAnnotationSnapshot(session: AnnotationSession, reply: { notes: Pe
   session.notes = new Map(session.saved);
   for (const [id, mutation] of session.pending) {
     if (mutation.action === "remove") session.notes.delete(id);
+    else if (mutation.action === "consume") {
+      if (mutation.before || sameAnnotationNote(session.notes.get(id), mutation.note)) session.notes.delete(id);
+    }
     else session.notes.set(id, mutation.note);
   }
   applyAnnotationSession(session);
@@ -1474,8 +1493,15 @@ async function refreshAnnotationSession(session: AnnotationSession): Promise<voi
 function queueAnnotationMutation(mutation: NoteMutation, immediate = false): void {
   const session = currentAnnotationSession();
   const id = mutation.action === "remove" ? mutation.id : mutation.note.id;
+  const previous = session.pending.get(id);
+  // Preserve a debounced/in-flight edit until storage acknowledges it. A
+  // consume of the edited snapshot must not run against its older saved copy.
+  if (mutation.action === "consume" && previous?.action === "upsert") mutation.before = previous;
   session.pending.set(id, mutation);
   if (mutation.action === "remove") session.notes.delete(id);
+  else if (mutation.action === "consume") {
+    if (sameAnnotationNote(session.notes.get(id), mutation.note)) session.notes.delete(id);
+  }
   else session.notes.set(id, mutation.note);
   session.error = "";
   if (immediate) void flushAnnotationSession(session);
@@ -1489,11 +1515,16 @@ async function flushAnnotationSession(session: AnnotationSession): Promise<void>
     if (!session.loaded) return;
     try {
       while (session.pending.size) {
-        const action = session.pending.values().next().value!.action;
-        const batch = Array.from(session.pending.entries()).filter(([, mutation]) => mutation.action === action);
-        const extra = action === "remove" ? { ids: batch.map(([id]) => id) } : { notes: batch.map(([, mutation]) => (mutation as Extract<NoteMutation, { action: "upsert" }>).note) };
+        const ready = Array.from(session.pending.entries()).map(([id, mutation]): [string, NoteMutation] => [id, mutation.action === "consume" ? mutation.before ?? mutation : mutation]);
+        const action = ready[0]![1].action;
+        const batch = ready.filter(([, mutation]) => mutation.action === action);
+        const extra = action === "remove" ? { ids: batch.map(([id]) => id) } : { notes: batch.map(([, mutation]) => (mutation as Extract<NoteMutation, { note: PersistedNoteItem }>).note) };
         const reply = await annotationRequest(session, action, extra);
-        for (const [id, mutation] of batch) if (session.pending.get(id) === mutation) session.pending.delete(id);
+        for (const [id, mutation] of batch) {
+          const pending = session.pending.get(id);
+          if (pending === mutation) session.pending.delete(id);
+          else if (pending?.action === "consume" && pending.before === mutation) delete pending.before;
+        }
         acceptAnnotationSnapshot(session, reply);
         session.error = "";
       }

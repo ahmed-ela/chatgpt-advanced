@@ -4,6 +4,28 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-10-22
+
+### Fixed
+
+- Clear the reply notes successfully transferred by the blue insert arrow so later reply batches do not repeat earlier notes.
+- Keep notes when insertion is blocked or fails, and preserve newer edits and notes that were not included in the transferred batch.
+
+## [0.3.14] - 2026-10-22
+
+### Fixed
+
+- Resume a saved ChatGPT queue after later manually submitted turns finish, verifying the original anchor and every intervening response before sending.
+- Preserve the hold for missing, ambiguous, unfinished, or mismatched transcripts; add visible and background regressions for automatic recovery and duplicate-send prevention.
+
+## [0.3.13] - 2026-10-11
+
+### Fixed
+
+- Recognize ChatGPT's current completed-turn state and response toolbar when both belong to the exact queued conversation turn, preserving active-response and identity checks.
+- Wake background queue checks when the provider changes its turn-completion attribute, without waiting for a polling timer.
+- Explain why completion could not be verified and preserve queued messages through missing transcript data and failed completion acknowledgements.
+
 ## [0.3.12] - 2026-10-11
 
 ### Fixed

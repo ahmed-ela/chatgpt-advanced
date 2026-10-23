@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias, type ConversationAlias } from "../src/chatgpt-dom";
+import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, getAssistantCompletionStatusAfter, registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias, type ConversationAlias, type AssistantCompletionStatus } from "../src/chatgpt-dom";
 
 let dom: Window;
 let document: Document;
@@ -13,6 +13,27 @@ function layout(button = '<button data-testid="send-button" aria-label="Send pro
     <div data-chatgpt-search-unit-key="one:user"><div data-chatgpt-selection-message-id="user-1" data-chatgpt-selection-conversation-id="${id}"><p>First question.</p></div><button>Edit</button></div>
     <div data-chatgpt-search-unit-key="two:assistant"><div data-chatgpt-selection-message-id="assistant-1" data-chatgpt-selection-conversation-id="${id}"><div data-markdown-text-style="assistant-message"><p>First answer.</p></div></div><button data-testid="copy-turn-action-button">Copy</button></div>
     </main><div data-composer-body><div data-composer-footer-responsive><div data-composer-input><div data-composer-markdown contenteditable="true" role="textbox"></div></div>${button}</div></div>`;
+}
+
+// Sanitized October 11 live ChatGPT shape: the committed answer's action
+// toolbar is six ancestors above the body, outside it, inside the exact turn.
+// Current controls have no testids and do not include "Rate response".
+function currentCompletedTurn(): void {
+  layout();
+  document.querySelector("main")!.innerHTML = `<div data-talvt-turn-state="complete">
+    <div data-chatgpt-search-unit-key="one:user"><div data-chatgpt-selection-message-id="user-1" data-chatgpt-selection-conversation-id="${id}"><p>Sanitized question.</p></div></div>
+    <div class="answer-area"><div data-chatgpt-search-unit-key="two:assistant"><div class="message"><div class="bubble"><div data-chatgpt-selection-message-id="assistant-1" data-chatgpt-selection-conversation-id="${id}"><div data-markdown-text-style="assistant-message"><p>Sanitized completed answer.</p></div></div></div></div></div></div>
+    <div class="response-actions"><button aria-label="Copy">Copy</button><button aria-label="Share">Share</button><button aria-label="Read aloud">Read aloud</button><button aria-label="Regenerate response">Regenerate response</button><button aria-label="More actions">More actions</button></div>
+  </div><span role="status" aria-busy="false">Response complete</span>`;
+}
+
+function appendCurrentTurn(userId: string, assistantId: string, state = "complete"): HTMLElement {
+  const turn = document.querySelector("main > [data-talvt-turn-state]")!.cloneNode(true) as HTMLElement;
+  turn.setAttribute("data-talvt-turn-state", state);
+  turn.querySelector("[data-chatgpt-selection-message-id='user-1']")!.setAttribute("data-chatgpt-selection-message-id", userId);
+  turn.querySelector("[data-chatgpt-selection-message-id='assistant-1']")!.setAttribute("data-chatgpt-selection-message-id", assistantId);
+  document.querySelector("main")!.append(turn);
+  return turn;
 }
 
 beforeEach(() => {
@@ -341,6 +362,40 @@ describe("queue DOM adapter", () => {
     expect(getAssistantCompletionAfter("user-2")).toBe(true);
   });
 
+  test.each(["visible", "hidden"] as const)("an older anchor follows later native turns only after the latest positive completion while %s", visibility => {
+    currentCompletedTurn();
+    Object.defineProperty(document, "visibilityState", { value: visibility, configurable: true });
+    appendCurrentTurn("user-2", "assistant-2");
+    const latest = appendCurrentTurn("user-3", "assistant-3", "unknown");
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+    latest.setAttribute("data-talvt-turn-state", "complete");
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+  });
+
+  test.each([
+    ["newest user unanswered", () => document.querySelector("main")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="user" data-message-id="user-4">Newest unanswered request.</div>'), "completion-unverified"],
+    ["latest assistant missing", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-3']")!.remove(), "completion-unverified"],
+    ["latest assistant uncommitted", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-3']")!.removeAttribute("data-chatgpt-selection-message-id"), "busy"],
+    ["latest turn streaming", () => document.querySelector("main")!.lastElementChild!.setAttribute("data-talvt-turn-state", "streaming"), "busy"],
+    ["active Stop", () => document.querySelector("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<button aria-label="Stop generating">Stop</button>'), "busy"],
+    ["latest toolbar missing", () => document.querySelector("main")!.lastElementChild!.querySelector(".response-actions")!.remove(), "completion-unverified"],
+    ["intermediate response missing", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-2']")!.remove(), "completion-unverified"],
+    ["intermediate completion unverified", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-2']")!.closest("[data-talvt-turn-state]")!.removeAttribute("data-talvt-turn-state"), "completion-unverified"],
+    ["original anchor missing", () => document.querySelector("[data-chatgpt-selection-message-id='user-1']")!.parentElement!.remove(), "anchor-missing"],
+    ["duplicate original anchor", () => document.querySelector("main")!.append(document.querySelector("[data-chatgpt-selection-message-id='user-1']")!.parentElement!.cloneNode(true)), "completion-unverified"],
+    ["duplicate latest user", () => document.querySelector("main")!.append(document.querySelector("[data-chatgpt-selection-message-id='user-3']")!.parentElement!.cloneNode(true)), "completion-unverified"],
+    ["duplicate latest assistant", () => document.querySelector("main")!.append(document.querySelector("[data-chatgpt-selection-message-id='assistant-3']")!.cloneNode(true)), "completion-unverified"],
+    ["wrong route", () => dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), "identity-unverified"],
+    ["mixed conversation", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-3']")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), "identity-unverified"],
+  ] as Array<[string, () => void, AssistantCompletionStatus]>)("an older anchor cannot advance through %s", (_, mutate, status) => {
+    currentCompletedTurn();
+    appendCurrentTurn("user-2", "assistant-2");
+    appendCurrentTurn("user-3", "assistant-3");
+    mutate();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe(status);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
   test("finds the live sibling toolbar while rejecting code-block copy alone", () => {
     const main = document.querySelector("main")!;
     main.innerHTML = `<div class="turn"><div class="turn-content">${main.innerHTML}</div><div><button aria-label="Copy">Copy</button><button aria-label="Rate response">Rate</button></div></div>`;
@@ -349,6 +404,137 @@ describe("queue DOM adapter", () => {
     main.querySelector("[aria-label='Rate response']")!.remove();
     main.querySelector("[data-markdown-text-style='assistant-message']")!.insertAdjacentHTML("beforeend", '<pre><code>example</code><button aria-label="Copy">Copy</button></pre>');
     expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test.each([
+    ["Chrome", "visible"], ["Chrome", "hidden"], ["Firefox", "visible"], ["Firefox", "hidden"],
+  ] as const)("current six-wrapper completed turn is recognized by the shared %s adapter while %s", (browser, visibility) => {
+    currentCompletedTurn();
+    Object.defineProperty(dom.navigator, "userAgent", { value: browser === "Firefox" ? "Mozilla/5.0 Firefox/143.0" : "Mozilla/5.0 Chrome/141.0.0.0", configurable: true });
+    Object.defineProperty(document, "visibilityState", { value: visibility, configurable: true });
+    const answer = document.querySelector("[data-markdown-text-style='assistant-message']")!;
+    let parent: Element | null = answer;
+    for (let depth = 0; depth < 6; depth++) parent = parent!.parentElement;
+    expect(parent?.getAttribute("data-talvt-turn-state")).toBe("complete");
+    expect(document.querySelector("main")!.querySelector("[data-testid], [aria-label='Rate response']") === null).toBe(true);
+    expect(isChatBusy()).toBe(false);
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+    expect(getAssistantCompletionAfter("user-1")).toBe(true);
+  });
+
+  test("current completion evidence releases retained earlier thinking without cloning the transcript twice", () => {
+    currentCompletedTurn();
+    document.querySelector(".answer-area")!.insertAdjacentHTML("afterbegin", '<div data-markdown-animated>Earlier thinking.</div>');
+    let copies = 0;
+    const body = document.querySelector("[data-markdown-text-style='assistant-message']")!;
+    const clone = body.cloneNode.bind(body);
+    Object.defineProperty(body, "cloneNode", { value: (deep?: boolean) => { copies++; return clone(deep); } });
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+    expect(copies).toBe(1);
+    document.querySelector("[aria-label='Regenerate response']")!.remove();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("busy");
+  });
+
+  test.each([
+    ["complete marker alone", () => document.querySelector(".response-actions")!.remove(), "completion-unverified"],
+    ["toolbar alone", () => document.querySelector("[data-talvt-turn-state]")!.removeAttribute("data-talvt-turn-state"), "completion-unverified"],
+    ["unknown turn state", () => document.querySelector("[data-talvt-turn-state]")!.setAttribute("data-talvt-turn-state", "unknown"), "completion-unverified"],
+    ["streaming turn state", () => document.querySelector("[data-talvt-turn-state]")!.setAttribute("data-talvt-turn-state", "streaming"), "busy"],
+    ["busy completed turn", () => document.querySelector("[data-talvt-turn-state]")!.setAttribute("aria-busy", "true"), "busy"],
+    ["busy answer descendant", () => document.querySelector(".bubble")!.setAttribute("aria-busy", "true"), "busy"],
+    ["streaming completed turn", () => document.querySelector("[data-talvt-turn-state]")!.setAttribute("data-is-streaming", "true"), "busy"],
+    ["active Stop", () => document.querySelector("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<button aria-label="Stop">Stop</button>'), "busy"],
+    ["missing anchor", () => document.querySelector("[data-chatgpt-search-unit-key='one:user']")!.remove(), "anchor-missing"],
+    ["missing assistant", () => document.querySelector(".answer-area")!.remove(), "assistant-missing"],
+    ["empty assistant", () => { document.querySelector("[data-markdown-text-style='assistant-message']")!.textContent = ""; }, "assistant-missing"],
+    ["uncommitted assistant", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-1']")!.removeAttribute("data-chatgpt-selection-message-id"), "busy"],
+    ["newer user outside turn", () => document.querySelector("main")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="user" data-message-id="user-2">A newer request.</div>'), "completion-unverified"],
+    ["different user inside turn", () => document.querySelector("[data-talvt-turn-state]")!.insertAdjacentHTML("afterbegin", '<div data-message-author-role="user" data-message-id="user-0">Another turn.</div>'), "completion-unverified"],
+    ["different assistant inside turn", () => document.querySelector("[data-talvt-turn-state]")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="assistant" data-message-id="assistant-0">Another answer.</div>'), "completion-unverified"],
+    ["duplicate committed assistant", () => document.querySelector("[data-talvt-turn-state]")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="assistant" data-message-id="assistant-1">Duplicated visible answer.</div>'), "completion-unverified"],
+    ["duplicate user anchor", () => document.querySelector("[data-talvt-turn-state]")!.insertAdjacentHTML("afterbegin", '<div data-message-author-role="user" data-message-id="user-1">Duplicated visible user.</div>'), "completion-unverified"],
+    ["stale route", () => dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), "identity-unverified"],
+    ["mixed conversation", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-1']")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), "identity-unverified"],
+    ["no conversation identity", () => document.querySelectorAll("[data-chatgpt-selection-conversation-id]").forEach(node => node.removeAttribute("data-chatgpt-selection-conversation-id")), "identity-unverified"],
+    ["transcript loading", () => document.querySelector("main")!.setAttribute("aria-busy", "true"), "conversation-loading"],
+  ] as Array<[string, () => void, AssistantCompletionStatus]>)("current completed-turn evidence rejects %s with a specific safe status", (_, mutate, status) => {
+    currentCompletedTurn();
+    mutate();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe(status);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test.each(["Copy", "Regenerate response", "toolbar"])("a hidden current %s control cannot prove completion", control => {
+    for (const attributes of ["hidden", 'aria-hidden="true"', 'style="display:none"', 'style="visibility:hidden"']) {
+      currentCompletedTurn();
+      const target = control === "toolbar" ? document.querySelector(".response-actions")! : document.querySelector(`[aria-label='${control}']`)!;
+      target.insertAdjacentHTML("beforebegin", `<div ${attributes}></div>`);
+      target.previousElementSibling!.append(target);
+      expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+      expect(getAssistantCompletionAfter("user-1")).toBe(false);
+    }
+  });
+
+  test("current response actions inside the answer or another turn cannot prove completion", () => {
+    currentCompletedTurn();
+    document.querySelector("[data-markdown-text-style='assistant-message']")!.append(document.querySelector(".response-actions")!);
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+    currentCompletedTurn();
+    document.querySelector("main")!.append(document.querySelector(".response-actions")!);
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+  });
+
+  test("completion does not scan past the bounded turn or accept page-wide Response complete text", () => {
+    currentCompletedTurn();
+    const area = document.querySelector(".answer-area")!;
+    for (let depth = 0; depth < 3; depth++) {
+      const wrapper = document.createElement("div");
+      area.parentElement!.insertBefore(wrapper, area);
+      wrapper.append(area);
+    }
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+    currentCompletedTurn();
+    document.querySelector("[data-talvt-turn-state]")!.removeAttribute("data-talvt-turn-state");
+    document.body.insertAdjacentHTML("beforeend", '<span>Response complete</span>');
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("a hidden cached completed turn cannot supply current response controls", () => {
+    currentCompletedTurn();
+    const cached = document.querySelector("[data-talvt-turn-state]")!.cloneNode(true) as HTMLElement;
+    cached.hidden = true;
+    document.querySelector("main")!.prepend(cached);
+    document.querySelector("main > [data-talvt-turn-state]:not([hidden]) .response-actions")!.remove();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+  });
+
+  test("completion status rechecks state, identity and anchors after each mutation without caching success", () => {
+    currentCompletedTurn();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+    document.querySelector("[data-talvt-turn-state]")!.setAttribute("data-talvt-turn-state", "streaming");
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("busy");
+    currentCompletedTurn();
+    dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("identity-unverified");
+    dom.happyDOM.setURL(`https://chatgpt.com/c/${id}`);
+    expect(getAssistantCompletionStatusAfter("missing-anchor")).toBe("anchor-missing");
+    currentCompletedTurn();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+  });
+
+  test("completed-turn proof is never carried into a replacement document with the same route and message IDs", async () => {
+    currentCompletedTurn();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+    const previousDom = dom;
+    dom = new Window({ url: `https://chatgpt.com/c/${id}` });
+    document = dom.document as unknown as Document;
+    for (const name of globals) Object.defineProperty(globalThis, name, { value: name === "window" ? dom : name === "document" ? document : dom[name], configurable: true, writable: true });
+    Object.defineProperty(dom.HTMLElement.prototype, "getClientRects", { value: () => [new dom.DOMRect(0, 0, 100, 20)], configurable: true });
+    currentCompletedTurn();
+    document.querySelector(".response-actions")!.remove();
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("completion-unverified");
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+    await previousDom.happyDOM.close();
   });
 
   test("an uncommitted animated body counts as busy between stop-button updates", () => {
