@@ -4,13 +4,28 @@ Latest public-listing verification: **October 25, 2026, America/Los_Angeles**.
 
 **Version 0.3.15 is publicly available.** The [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei) shows version **0.3.15**, updated **October 23, 2026**. This supersedes the older pending-review observation below.
 
-**Version 0.3.16 is prepared and its source is squash-merged; Store upload and submission are not yet confirmed.** [PR #10](https://github.com/ahmed-ela/chatgpt-advanced/pull/10) merged as `8384fe662fe6d438608b2ec12011d7523fe83819`. See [the qualification report](QUEUE_VIRTUALIZATION_0.3.16.md), including the incomplete live long-transcript verification. The production Chrome archive has SHA-256 `89f5f1b6b3b55e3c4e76de0f2490f7736e139b73224b9b5437daa3b8c9b74983`.
+**Version 0.3.16 was successfully submitted and is Pending review**, confirmed in the publisher dashboard on **October 25, 2026 at 22:23 PDT (October 26 at 05:23 UTC)**. Automatic publication after approval is enabled; 0.3.15 remains the published version. [PR #10](https://github.com/ahmed-ela/chatgpt-advanced/pull/10) merged as `8384fe662fe6d438608b2ec12011d7523fe83819`. See [the qualification report](QUEUE_VIRTUALIZATION_0.3.16.md), including the incomplete live long-transcript verification. The production Chrome archive has SHA-256 `89f5f1b6b3b55e3c4e76de0f2490f7736e139b73224b9b5437daa3b8c9b74983`.
 
 [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) distinguish local builds, store submission, review, and public availability.
 
 The submitted **0.3.15 production package** clears successfully transferred reply batches, preserving failed insertions and notes outside the transferred snapshot. It also includes the 0.3.13 completion-detection and 0.3.14 later-native-turn queue recovery changes. See [the reply release report](REPLY_BATCH_0.3.15.md) for guards, automated evidence, and live ChatGPT, Claude, and Gemini checks. Source commits and local builds do not change the live Store version.
 
 The earlier public-listing check confirmed 0.3.6 was available on October 7; that historical evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
+
+## Current public update submission 0.3.16
+
+- Publisher/account: Threadlane, `threadlane.support@gmail.com`.
+- Existing public item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
+- Store revision: `00009`; pending package version: **0.3.16**.
+- Status: **Pending review**; published version: **0.3.15**.
+- Automatic publication after approval: enabled; the submission checkbox was checked before confirmation.
+- Existing listing, distribution settings, privacy disclosures, icons, and three provider screenshots were retained.
+
+The verified `/Users/ahmedelamin/Downloads/threadlane-0.3.16.zip` was selected in Chrome's native file picker. Its SHA-256 is `89f5f1b6b3b55e3c4e76de0f2490f7736e139b73224b9b5437daa3b8c9b74983`. The package page showed draft version 0.3.16 before submission. Google's success dialog confirmed submission, and the package page then showed Pending review, revision 00009, draft 0.3.16, and published 0.3.15.
+
+Source [PR #10](https://github.com/ahmed-ela/chatgpt-advanced/pull/10) was squash-merged as `8384fe662fe6d438608b2ec12011d7523fe83819`. All 701 tests passed in the qualification run; see [QUEUE_VIRTUALIZATION_0.3.16.md](QUEUE_VIRTUALIZATION_0.3.16.md) for the live-testing limitation. No runtime changes or new tests were added during submission. No Firefox publication or update-feed promotion was performed by this Chrome release workflow.
+
+Evidence is preserved locally in `outputs/identity-virtualization-2026-10-25/` in the release worktree: `submission-result-ax.txt`, `submission-success-0.3.16.png`, `pending-package-0.3.16-ax.txt`, and `pending-package-0.3.16.png`. This confirms submission, not approval or public availability of 0.3.16.
 
 ## Historical submission of the now-public 0.3.15 update
 
