@@ -1,16 +1,20 @@
 # Chrome Web Store submission status
 
-Latest update verified in the Threadlane publisher dashboard on **2026-10-23 at 04:42 UTC (October 22 at 21:42 PDT)**.
+Latest public-listing verification: **October 25, 2026, America/Los_Angeles**.
 
-**Update 0.3.15 is pending review**, store revision `00008`, on the existing public item. Automatic publication after approval is enabled. Pending review is not approval or availability of this update.
+**Version 0.3.15 is publicly available.** The [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei) shows version **0.3.15**, updated **October 23, 2026**. This supersedes the older pending-review observation below.
 
-**The publisher dashboard identifies version 0.3.12 as published on the public item.** The pending 0.3.15 update has not replaced it. [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei). [LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) distinguish this submission from public availability.
+**Version 0.3.16 is prepared and its source is squash-merged; Store upload and submission are not yet confirmed.** [PR #10](https://github.com/ahmed-ela/chatgpt-advanced/pull/10) merged as `8384fe662fe6d438608b2ec12011d7523fe83819`. See [the qualification report](QUEUE_VIRTUALIZATION_0.3.16.md), including the incomplete live long-transcript verification. The production Chrome archive has SHA-256 `89f5f1b6b3b55e3c4e76de0f2490f7736e139b73224b9b5437daa3b8c9b74983`.
+
+[LISTING.md](LISTING.md) and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) distinguish local builds, store submission, review, and public availability.
 
 The submitted **0.3.15 production package** clears successfully transferred reply batches, preserving failed insertions and notes outside the transferred snapshot. It also includes the 0.3.13 completion-detection and 0.3.14 later-native-turn queue recovery changes. See [the reply release report](REPLY_BATCH_0.3.15.md) for guards, automated evidence, and live ChatGPT, Claude, and Gemini checks. Source commits and local builds do not change the live Store version.
 
 The earlier public-listing check confirmed 0.3.6 was available on October 7; that historical evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
 
-## Current public update 0.3.15
+## Historical submission of the now-public 0.3.15 update
+
+The following records the publisher-dashboard observation on **2026-10-23 at 04:42 UTC (October 22 at 21:42 PDT)**. Its pending status and then-published 0.3.12 version are historical; the public listing was subsequently verified as 0.3.15 above.
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
