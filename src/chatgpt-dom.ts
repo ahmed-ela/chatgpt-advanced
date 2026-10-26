@@ -25,11 +25,14 @@ let conversationAlias: ConversationAlias | null = null;
 let aliasDocument: Document | null = null;
 const verifiedAliases = new Map<string, ConversationAlias>();
 const MAX_VERIFIED_ALIASES = 16;
+const activeAliasUserIds = new Set<string>();
+const MAX_ACTIVE_ALIAS_USER_IDS = 32;
 
 function ensureAliasDocument(): void {
   if (aliasDocument === document) return;
   aliasDocument = document;
   conversationAlias = null;
+  activeAliasUserIds.clear();
   verifiedAliases.clear();
 }
 
@@ -370,12 +373,40 @@ function matchesVisibleConversationAlias(alias: ConversationAlias): boolean {
     firstUser?.id === alias.firstUserId;
 }
 
+function matchesAliasUsers(alias: ConversationAlias, userIds: string[]): boolean {
+  if (userIds[0] === alias.firstUserId) return true;
+  // A mounted original first turn must still be first. Continuity is only for
+  // a virtualized window which no longer contains that turn, not a replacement
+  // or reordered transcript. It expires on every route/document transition.
+  return !userIds.includes(alias.firstUserId) && conversationAlias?.routeKey === alias.routeKey &&
+    conversationAlias.localId === alias.localId && conversationAlias.firstUserId === alias.firstUserId &&
+    userIds.some(id => activeAliasUserIds.has(id));
+}
+
+function rememberAliasUsers(alias: ConversationAlias, userIds: string[]): void {
+  conversationAlias = alias;
+  for (const id of userIds) {
+    activeAliasUserIds.delete(id);
+    activeAliasUserIds.add(id);
+  }
+  while (activeAliasUserIds.size > MAX_ACTIVE_ALIAS_USER_IDS) activeAliasUserIds.delete(activeAliasUserIds.values().next().value!);
+}
+
 /** Return an exact observed witness, including while its first answer is busy. */
 export function getVerifiedConversationAlias(): ConversationAlias | null {
   ensureAliasDocument();
   const key = getQueueKey(window.location.href);
+  if (conversationAlias && conversationAlias.routeKey !== key) {
+    conversationAlias = null;
+    activeAliasUserIds.clear();
+  }
   const alias = key && (conversationAlias?.routeKey === key ? conversationAlias : verifiedAliases.get(key));
-  return alias && matchesVisibleConversationAlias(alias) ? { ...alias } : null;
+  if (!alias || !findQueueComposer()) return null;
+  const markerIds = visibleConversationIds();
+  const userIds = getVisibleUserMessages().map(message => message.id);
+  if (!markerIds.length || markerIds.some(id => id !== alias.localId) || !matchesAliasUsers(alias, userIds)) return null;
+  rememberAliasUsers(alias, userIds);
+  return { ...alias };
 }
 
 /** Restore only a durable first-send witness; this does not authorize completion. */
@@ -391,6 +422,8 @@ export function restoreConversationAlias(alias: ConversationAlias): boolean {
     (previous.firstUserId === alias.firstUserId && previous.routeKey !== alias.routeKey),
   )) return false;
   conversationAlias = { routeKey: alias.routeKey, localId: alias.localId, firstUserId: alias.firstUserId };
+  activeAliasUserIds.clear();
+  rememberAliasUsers(conversationAlias, getVisibleUserMessages().map(message => message.id));
   verifiedAliases.delete(alias.routeKey);
   verifiedAliases.set(alias.routeKey, conversationAlias);
   if (verifiedAliases.size > MAX_VERIFIED_ALIASES) verifiedAliases.delete(verifiedAliases.keys().next().value!);
@@ -399,6 +432,7 @@ export function restoreConversationAlias(alias: ConversationAlias): boolean {
 
 export function clearConversationAlias(retainVerified = false): void {
   conversationAlias = null;
+  activeAliasUserIds.clear();
   if (retainVerified) ensureAliasDocument();
   else { verifiedAliases.clear(); aliasDocument = null; }
 }
@@ -412,7 +446,10 @@ type ConversationState = { status: "ready"; messages: MessageRecord[] } |
 function currentConversationState(): ConversationState {
   ensureAliasDocument();
   const key = getQueueKey(window.location.href);
-  if (conversationAlias && conversationAlias.routeKey !== key) conversationAlias = null;
+  if (conversationAlias && conversationAlias.routeKey !== key) {
+    conversationAlias = null;
+    activeAliasUserIds.clear();
+  }
   if (!key || !findQueueComposer() || (currentProvider() === "chatgpt" && hasLoadingState())) return { status: "loading", messages: null };
   const messages = visibleMessages();
   if (!messages.length) return { status: "loading", messages: null };
@@ -426,9 +463,10 @@ function currentConversationState(): ConversationState {
       // Restoration authorizes only the exact tuple this document observed on
       // a real first send. URL and matching text alone never create an alias.
       const alias = conversationAlias ?? verifiedAliases.get(key);
+      const userIds = messages.filter(message => message.role === "user").map(message => message.id);
       if (!alias || alias.routeKey !== key || markerIds.some((markerId) => markerId !== alias.localId) ||
-          messages.find(message => message.role === "user")?.id !== alias.firstUserId) return { status: "identity-unverified", messages: null };
-      conversationAlias = alias;
+          !matchesAliasUsers(alias, userIds)) return { status: "identity-unverified", messages: null };
+      rememberAliasUsers(alias, userIds);
     }
   }
   return { status: "ready", messages };

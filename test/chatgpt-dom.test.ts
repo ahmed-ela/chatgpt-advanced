@@ -907,4 +907,66 @@ describe("queue DOM adapter", () => {
     clearConversationAlias();
     expect(isCurrentConversationReady()).toBe(false);
   });
+
+  function appendLocalUser(userId: string): HTMLElement {
+    const turn = document.createElement("article");
+    turn.setAttribute("data-chatgpt-search-unit-key", `${userId}:user`);
+    turn.innerHTML = `<div data-chatgpt-selection-message-id="${userId}" data-chatgpt-selection-conversation-id="local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc"><p>Another question.</p></div>`;
+    document.querySelector("main")!.append(turn);
+    return turn;
+  }
+
+  test("an established alias follows overlapping virtualized turns after the first user unmounts", () => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    const second = appendLocalUser("22222222-2222-4222-8222-222222222222");
+    expect(getVerifiedConversationAlias()).not.toBeNull();
+    document.querySelector("[data-chatgpt-search-unit-key='one:user']")!.remove();
+    const third = appendLocalUser("33333333-3333-4333-8333-333333333333");
+    expect(getCurrentConversationReadiness()).toBe("ready");
+    expect(getVerifiedConversationAlias()?.firstUserId).toBe("11111111-1111-4111-8111-111111111111");
+    second.remove();
+    appendLocalUser("44444444-4444-4444-8444-444444444444");
+    expect(getCurrentConversationReadiness()).toBe("ready");
+    third.remove();
+    expect(getVerifiedConversationAlias()).not.toBeNull();
+  });
+
+  test("virtualized alias continuity requires a previously observed exact user ID", () => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    document.querySelector("[data-chatgpt-search-unit-key='one:user']")!.remove();
+    appendLocalUser("22222222-2222-4222-8222-222222222222");
+    expect(getCurrentConversationReadiness()).toBe("identity-unverified");
+    expect(getVerifiedConversationAlias()).toBeNull();
+  });
+
+  test.each(["route", "document", "local-id", "prepended-user"] as const)("virtualized alias continuity cannot cross a changed %s", async change => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    appendLocalUser("22222222-2222-4222-8222-222222222222");
+    const witness = getVerifiedConversationAlias()!;
+    const first = document.querySelector("[data-chatgpt-search-unit-key='one:user']")!;
+    if (change !== "prepended-user") first.remove();
+    if (change === "route") {
+      dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      expect(isCurrentConversationReady()).toBe(false);
+      dom.happyDOM.setURL(`https://chatgpt.com/c/${id}`);
+    }
+    if (change === "document") {
+      const previousDom = dom;
+      const markup = document.body.innerHTML;
+      dom = new Window({ url: `https://chatgpt.com/c/${id}` });
+      document = dom.document as unknown as Document;
+      for (const name of globals) Object.defineProperty(globalThis, name, { value: name === "window" ? dom : name === "document" ? document : dom[name], configurable: true, writable: true });
+      Object.defineProperty(dom.HTMLElement.prototype, "getClientRects", { value: () => [new dom.DOMRect(0, 0, 100, 20)], configurable: true });
+      document.body.innerHTML = markup;
+      await previousDom.happyDOM.close();
+    }
+    if (change === "local-id") document.querySelector("[data-chatgpt-selection-conversation-id]")!.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    if (change === "prepended-user") document.querySelector("main")!.prepend(appendLocalUser("33333333-3333-4333-8333-333333333333"));
+    expect(getCurrentConversationReadiness()).toBe("identity-unverified");
+    expect(getVerifiedConversationAlias()).toBeNull();
+    expect(restoreConversationAlias(witness)).toBe(false);
+  });
 });

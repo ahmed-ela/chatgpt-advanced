@@ -219,6 +219,36 @@ function simulateNativeChat(tab: Tab, renderUser?: (bubble: HTMLElement, text: s
   return result;
 }
 
+async function localQueueBeforeVirtualization(state: DocumentVisibilityState): Promise<{
+  tab: Tab; main: HTMLElement; localId: string; firstTurn: Element[];
+  native: ReturnType<typeof simulateNativeChat>; first: string; second: string;
+}> {
+  const tab = await createTab({ newChat: true, visibility: state });
+  const localId = "local-chatgpt:77777777-7777-4777-8777-777777777777";
+  const main = tab.doc.querySelector<HTMLElement>("main")!;
+  draft(tab, "First native message before older turns are virtualized");
+  tab.action.addEventListener("click", () => {
+    tab.dom.history.pushState({}, "", "/c/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    main.setAttribute("data-chatgpt-selection-conversation-id", localId);
+    main.innerHTML = `<article data-chatgpt-search-unit-key="11111111-1111-4111-8111-111111111111:user" data-chatgpt-search-message-ids="11111111-1111-4111-8111-111111111111"><div data-user-message-bubble="true">First native message before older turns are virtualized</div></article>
+      <article data-chatgpt-selection-message-id="22222222-2222-4222-8222-222222222222"><div data-markdown-text-style="assistant-message">Completed first response</div><button data-testid="copy-turn-action-button">Copy</button></article>`;
+    draft(tab, ""); busy(tab, true);
+  }, { once: true });
+  tab.action.click(); await poll(tab);
+  const firstTurn = Array.from(main.children);
+  const first = await enqueue(tab, "First follow-up before virtualization");
+  const second = await enqueue(tab, "Second follow-up after virtualization");
+  const native = simulateNativeChat(tab);
+  busy(tab, false); now += 4000;
+  await poll(tab);
+  expect(native.sent).toEqual(["First follow-up before virtualization"]);
+  expect(tab.shadow.querySelector(`li[data-id='${first}']`)).toBeNull();
+  // Observe the later user while the original first turn is still mounted.
+  // The subsequent disappearance has positive transcript-continuity evidence.
+  await poll(tab);
+  return { tab, main, localId, firstTurn, native, first, second };
+}
+
 // The live ChatGPT turn has its final-state attribute several wrappers above
 // the response. Its native toolbar has no Rate controls or action test IDs.
 function currentChatGptResponse(doc: Document, state: string, responseId: string = crypto.randomUUID()): HTMLElement {
@@ -949,6 +979,46 @@ describe("Persistent message queue UI", () => {
     draft(tab, ""); await poll(tab);
     expect(tab.shadow.textContent).toContain("temporary conversation ID is not linked to this saved chat");
     expect(sends).toBe(1);
+  });
+
+  test.each(["visible", "hidden"] as const)("a %s local conversation drains queued messages once after ChatGPT virtualizes its first turn", async state => {
+    const { tab, main, localId, firstTurn, native, second } = await localQueueBeforeVirtualization(state);
+    firstTurn.forEach(node => node.remove());
+    expect(main.getAttribute("data-chatgpt-selection-conversation-id")).toBe(localId);
+    expect(main.querySelector("[data-chatgpt-search-message-ids='11111111-1111-4111-8111-111111111111']")).toBeNull();
+    await poll(tab);
+    expect(native.sent).toHaveLength(1);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueIdentitySource).toBe("native-first-send");
+    expect(tab.shadow.querySelector(`li[data-id='${second}']`)).not.toBeNull();
+    // Retained identity is not completion: only the still-mounted follow-up's
+    // committed reply and toolbar can release the next queued message.
+    native.finish(); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual(["First follow-up before virtualization", "Second follow-up after virtualization"]);
+    expect(tab.shadow.querySelector(`li[data-id='${second}']`)).toBeNull();
+    native.finish(); now += 4000;
+    await poll(tab);
+    expect((await persisted()).items).toHaveLength(0);
+    await poll(tab); await poll(tab);
+    expect(native.sent).toHaveLength(2);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(2);
+  });
+
+  test.each(["route", "local-ID"] as const)("virtualized local continuity cannot dispatch after a %s change", async change => {
+    const { tab, main, firstTurn, native, second } = await localQueueBeforeVirtualization("hidden");
+    firstTurn.forEach(node => node.remove());
+    await poll(tab);
+    if (change === "route") {
+      const otherKey = "chatgpt:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      await store.apply({ type: QUEUE_MESSAGE_TYPE, key: otherKey, clientId: "other-tab", action: "enqueue", id: "other-route-item", text: "Must stay in the other conversation" }, "other-tab", now);
+      tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    } else main.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    native.finish(); now += 4000;
+    await poll(tab); await poll(tab);
+    expect(native.sent).toEqual(["First follow-up before virtualization"]);
+    expect((await persisted()).items.some(item => item.id === second && item.status === "queued")).toBe(true);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("identity-unverified");
   });
 
   test("native submit from an unrelated form does not bind a new chat's local transcript", async () => {
