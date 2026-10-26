@@ -4,6 +4,13 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-10-25
+
+### Fixed
+
+- Keep an already verified ChatGPT conversation connected when older turns are unmounted, using overlapping message IDs previously witnessed in the same document and route.
+- Preserve strict identity restoration after navigation or restart, and continue blocking unknown transcripts, missing completion anchors, and unfinished responses.
+
 ## [0.3.15] - 2026-10-22
 
 ### Fixed
