@@ -1,5 +1,26 @@
 # Firefox signing and update verification status
 
+## Current verification — October 27, 2026
+
+**Firefox public version 0.3.5 is now available on [addons.mozilla.org](https://addons.mozilla.org/en-US/firefox/addon/threadlane/). The self-distributed beta feed remains at 0.3.2. Version 0.3.22 is prepared locally for both channels; neither candidate has been signed, submitted, or distributed.**
+
+- The public listing displays version **0.3.5** and exposes its [public XPI download](https://addons.mozilla.org/firefox/downloads/file/5088810/threadlane-0.3.5.xpi). An anonymous download succeeded. SHA-256: `0af582f7ef6698d04076b7df8aff80fce749269ccefe8c73115af099b1b832be`. Its manifest retains `threadlane@extensions.invalid`, omits `update_url`, and contains Mozilla signature metadata. This verifies public download availability, not a newly observed normal Firefox installation or cryptographic signature verification in Firefox.
+- The [public beta feed](https://raw.githubusercontent.com/ahmed-ela/threadlane-updates/main/firefox/updates.json) still advertises only **0.3.2**, matching the sole published `firefox-v0.3.2` release in `ahmed-ela/threadlane-updates`. The feed and hosted XPI were not modified during this release preparation.
+- The currently published 0.3.5 package has the older icons. All four icon files differ from the current Chrome flame artwork; the prepared 0.3.22 packages include the current shared icons. The AMO listing icon is separate metadata and was not changed here.
+
+### Prepared 0.3.22 artifacts
+
+- Self-distributed beta: `.local/release/firefox/0.3.22/threadlane-firefox-0.3.22.zip`, SHA-256 `071e697def8dcb26d43ffcc573f7e6fa382eae343c41a0e84bff098d9c59724a`. This manifest retains the stable GitHub update feed. Do not upload this package as the public listed version.
+- Public AMO candidate: `outputs/release-0.3.22/firefox/listed/threadlane-firefox-listed-0.3.22.zip`, SHA-256 `da07f99b266c9c315687e28dd496b59667b5381651a0261bd7a26f3dcc7a9068`.
+- Matching reviewer source: `outputs/release-0.3.22/firefox/listed/threadlane-firefox-listed-0.3.22-source.zip`, SHA-256 `1393b3a4d08fa2cf6adc9cdfd7014dd72df66942a19649efe2c1e8357b33ec07`.
+- The listed candidate omits only `gecko.update_url` compared with the same-version beta manifest; every runtime TypeScript file and the other nine production files match byte for byte. Its copied build and package validators reproduce that channel difference without changing the main source build configuration.
+- Fresh extraction of the 31-file reviewer archive, frozen dependency installation with Bun 1.3.5, and a Firefox build reproduced all ten production files byte for byte. Listed-mode web-ext lint reports zero errors, zero notices, and the four existing warnings. Build instructions, source/output hashes, reviewer notes, and preparation receipts are beside the listed artifacts. The source archive excludes dependencies, browser data, private test conversations, and Git metadata.
+- **Remaining:** live Firefox qualification of this exact candidate, normal signed installation/update verification, submission/signing, and publication/download readback. Beta promotion additionally requires a verified immutable signed asset and feed update. No API signing credentials were configured in the preparation environment; the existing authorized Mozilla browser session remains the documented submission route. Local build or source reproduction does not establish any of these external results.
+
+## Historical submission and installation record
+
+The sections below retain the state observed on their recorded dates. The October 27 verification above supersedes the earlier public-listing `Awaiting Review` status; it does not retroactively establish the other unfinished installation and update tests.
+
 Latest submission verified on **2026-10-05**. The signed beta installation and update observations below were recorded on 2026-10-04.
 
 **Firefox 0.3.5 has been submitted for a public addons.mozilla.org listing and is Awaiting Review; public installation is not yet verified. The self-distributed beta remains at signed, hosted 0.3.2. Mozilla has also signed 0.3.3, but the real 0.3.2 → 0.3.3 update test is still pending; 0.3.3 has not been installed normally or published to the feed.**
