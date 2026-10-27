@@ -1,6 +1,6 @@
 # Store listing
 
-Status: Public listing verified October 27, 2026 (America/Los_Angeles): **0.3.16**, updated October 26. **0.3.22 is the prepared update candidate; submission is not yet confirmed.** The description below includes draft preservation while queued messages send. See [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) for distinct submission and publication evidence.
+Status: Public listing verified October 27, 2026 (America/Los_Angeles): **0.3.16**, updated October 26. **0.3.22 was submitted on October 27 at 15:42 PDT and is Pending review, revision 00010, with automatic publication after approval enabled.** Version 0.3.16 remains published. The description below was submitted with draft preservation while queued messages send; existing icons and all three provider screenshots were retained. See [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) for distinct submission and publication evidence.
 
 ## Name
 
