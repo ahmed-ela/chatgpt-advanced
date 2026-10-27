@@ -2,7 +2,7 @@
 
 Unchecked items are release gates, not claims that checks have passed. Record the tested commit, version, ZIP hash, browser version, provider, date, and observed result when completing them. Public distribution is authorized and still requires store review. [Chrome distribution guidance](https://developer.chrome.com/docs/webstore/cws-dashboard-distribution/).
 
-Last verified Chrome dashboard state: **0.3.15 Pending review**, revision `00008`; **0.3.12 remains published**. Successful submission was confirmed October 23, 2026 at 04:42 UTC (October 22 at 21:42 PDT). [The 0.3.15 release report](REPLY_BATCH_0.3.15.md) records qualification scope; [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) records submission separately from public availability. Earlier Firefox records are historical and neither Firefox channel is promoted by this Chrome release. The unchecked reusable gates below do not imply that every operation was repeated for this patch.
+Latest public listing check: **0.3.16 is published**, updated October 26 and verified October 27, 2026 (America/Los_Angeles). **0.3.22 is prepared; new submission is not yet confirmed.** [RELEASE_0.3.22.md](RELEASE_0.3.22.md) records qualification scope, including 864 passing tests and the distinction between prior installed Chrome evidence and Firefox/other-provider fixtures. [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) tracks the separate review/publication gates. The reusable checks below do not claim every operation was repeated for this patch.
 
 ## Recorded 0.3.15 qualification
 
