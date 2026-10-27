@@ -4,6 +4,48 @@ Changes are recorded here before each version bump. Version 0.x is the developme
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-10-27
+
+### Fixed
+
+- Refuse a stale saved-draft Restore action after navigating to another conversation, preserving the original backup and leaving the new input untouched.
+
+## [0.3.21] - 2026-10-27
+
+### Fixed
+
+- Retire empty draft checkpoints in the same durable transaction that saves them, preventing blank, read-only recovery inputs after a reload or interrupted send cleanup. Existing empty records are repaired on the next queue read without removing real draft text.
+- Cover interrupted cleanup, restart recovery, concurrent typing, stale draft writes, storage failure, and recovery capacity with regression tests.
+
+## [0.3.20] - 2026-10-26
+
+### Fixed
+
+- Stop completed historical ChatGPT clarification statuses from falsely holding the entire conversation as busy. Ignore only verified historical auxiliary status bodies when a later response has positive completion evidence; preserve protection for current or uncertain generation.
+- Add regression coverage for native Send/Enter and automatic queue dispatch in conversations containing clarification and image-generation history.
+
+## [0.3.19] - 2026-10-26
+
+### Fixed
+
+- Restore an unfinished draft after a confirmed queued send while ChatGPT generates its response. Restoration now distinguishes verified conversation identity from generation readiness and still requires the exact newly posted turn, original composer, and unchanged route.
+- Retain the editable draft during a bounded wait when native confirmation precedes input clearing or a brief loading transition. Preserve recovery copies for changed composers, attachments, conflicting text, missing turns, and uncertain identity.
+
+## [0.3.18] - 2026-10-25
+
+### Fixed
+
+- Keep the native editor focused until its DOM-to-model commit settles before returning focus to the preserved draft. This fixes a live ChatGPT race in the unshipped 0.3.17 candidate that could submit the unsent draft instead of the queued payload.
+- Apply the same commit boundary to restoration and interrupted-send cleanup, preserve new input across that boundary, and add regressions that distinguish native editor state from visible DOM.
+
+## [0.3.17] - 2026-10-25
+
+### Fixed
+
+- Automatically send queued messages while a plain-text draft is being written, preserving its text, caret, and focus.
+- Keep ongoing typing separate during delayed native send replay, with encrypted local draft recovery and fail-closed handling for storage errors, navigation, and uncertain delivery.
+- Retain attachment, formatted-draft, composition, identity, and exact-once delivery guards; add regression coverage across ChatGPT, Claude, and Gemini.
+
 ## [0.3.16] - 2026-10-25
 
 ### Fixed

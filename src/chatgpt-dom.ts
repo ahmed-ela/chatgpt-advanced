@@ -124,20 +124,23 @@ export function findQueueStopButton(): HTMLButtonElement | null {
 
 export function readComposer(element: QueueComposer): string {
   if (element instanceof HTMLTextAreaElement) return element.value;
-  return plainText(element).replace(/\u00a0/g, " ");
+  return plainText(element, true).replace(/\u00a0/g, " ");
 }
 
 // innerText on detached clones loses paragraph boundaries, while textContent
 // loses <br>s. A small text walker keeps multiline queued text intact in both.
-function plainText(element: Node): string {
+function plainText(element: Node, editor = false): string {
   let text = "";
   for (const child of Array.from(element.childNodes)) {
     if (child.nodeType === 3) { text += child.textContent ?? ""; continue; }
     if (!(child instanceof HTMLElement)) continue;
+    // ProseMirror inserts a trailing BR to keep an empty/end-of-line editor
+    // selectable. It is decoration, not a character in the user's draft.
+    if (editor && child.tagName === "BR" && child.classList.contains("ProseMirror-trailingBreak")) continue;
     if (child.tagName === "BR") { text += "\n"; continue; }
     const block = /^(?:P|DIV|LI|PRE|BLOCKQUOTE|H[1-6])$/.test(child.tagName);
     if (block && text && !text.endsWith("\n")) text += "\n";
-    text += plainText(child);
+    text += plainText(child, editor);
     if (block && child.nextSibling && !text.endsWith("\n")) text += "\n";
   }
   return text;
@@ -207,11 +210,32 @@ function hasUnfinishedChatGptTurn(): boolean {
   // A responding turn may have an unidentified draft body while its existing
   // transcript identity is ready. Keep generation separate from route loading
   // so an explicit Send now can still stop that response safely.
-  if (Array.from(document.querySelectorAll<HTMLElement>(ASSISTANT_SELECTOR))
-    .some(body => isVisible(body) && !messageId(body))) return true;
+  const unidentified = Array.from(document.querySelectorAll<HTMLElement>(ASSISTANT_SELECTOR))
+    .filter(body => isVisible(body) && !messageId(body));
+  if (unidentified.length) {
+    const messages = currentConversationMessages();
+    if (unidentified.some(body => !isHistoricalAuxiliaryStatus(body, messages))) return true;
+  }
   if (Array.from(document.querySelectorAll("[data-talvt-turn-state]"))
     .some(turn => isVisible(turn) && /^(?:streaming|responding|thinking|pending|loading|in-progress|busy)$/.test(turn.getAttribute("data-talvt-turn-state") ?? ""))) return true;
   return Array.from(document.querySelectorAll("[data-talvt-turn-state][aria-busy='true'], [data-talvt-turn-state] [aria-busy='true']")).some(isVisible);
+}
+
+function isHistoricalAuxiliaryStatus(body: HTMLElement, messages: MessageRecord[] | null): boolean {
+  // Completed tool/image workflows can retain a tertiary status with no
+  // assistant message ID. Reconcile only that known auxiliary shape, after a
+  // later user and positively completed answer establish that it is history.
+  if (!body.matches("[data-markdown-text-style='assistant-message'][data-markdown-text-tone='tertiary']") ||
+      body.closest("[data-markdown-animated]") || body.querySelector("[data-markdown-animated]") || !messages) return false;
+  const turn = body.closest<HTMLElement>("[data-talvt-turn-state]");
+  if (!turn || turn.getAttribute("data-talvt-turn-state") !== "complete" || !turn.closest("main, [role='main']")) return false;
+  const ownUsers = messages.filter(message => message.role === "user" && turn.contains(message.element));
+  if (ownUsers.length !== 1 || !(ownUsers[0]!.element.compareDocumentPosition(body) & body.DOCUMENT_POSITION_FOLLOWING)) return false;
+  const latest = messages.at(-1);
+  const latestUser = [...messages].reverse().find(message => message.role === "user");
+  if (latest?.role !== "assistant" || !latestUser || turn.contains(latestUser.element) ||
+      !(turn.compareDocumentPosition(latestUser.element) & body.DOCUMENT_POSITION_FOLLOWING)) return false;
+  return chatGptCompletionContainer(latest, latestUser.id, messages) !== null;
 }
 
 function hasGenerationStopControl(): boolean {
@@ -443,14 +467,17 @@ type ConversationState = { status: "ready"; messages: MessageRecord[] } |
 
 // Return records for this synchronous validation only. Callers must read again
 // after an await or DOM change; route and completion evidence is never cached.
-function currentConversationState(): ConversationState {
+function currentConversationState(identityOnly = false): ConversationState {
   ensureAliasDocument();
   const key = getQueueKey(window.location.href);
   if (conversationAlias && conversationAlias.routeKey !== key) {
     conversationAlias = null;
     activeAliasUserIds.clear();
   }
-  if (!key || !findQueueComposer() || (currentProvider() === "chatgpt" && hasLoadingState())) return { status: "loading", messages: null };
+  const routeLoading = () => Array.from(document.querySelectorAll(
+    "main[aria-busy='true'], [role='main'][aria-busy='true'], [data-testid='conversation-loading'], [data-testid='conversation-loading-spinner']",
+  )).some(isVisible);
+  if (!key || !findQueueComposer() || (currentProvider() === "chatgpt" && (identityOnly ? routeLoading() : hasLoadingState()))) return { status: "loading", messages: null };
   const messages = visibleMessages();
   if (!messages.length) return { status: "loading", messages: null };
   if (currentProvider() !== "chatgpt") return providerConversationReady(key, messages)
@@ -482,6 +509,15 @@ export function getCurrentConversationReadiness(): ConversationReadiness {
 
 export function isCurrentConversationReady(): boolean {
   return currentConversationMessages() !== null;
+}
+
+/**
+ * Restore a user's unsent draft during a newly acknowledged response. Identity
+ * still needs the exact visible route/alias witness and a loaded transcript;
+ * response generation alone does not invalidate it. Never authorizes sending.
+ */
+export function hasVerifiedConversationIdentity(): boolean {
+  return currentConversationState(true).status === "ready";
 }
 
 /**

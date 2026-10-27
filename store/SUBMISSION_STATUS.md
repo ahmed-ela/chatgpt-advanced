@@ -1,5 +1,11 @@
 # Chrome Web Store submission status
 
+Latest public verification: **October 27, 2026, America/Los_Angeles**. The [public Threadlane listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei) shows **0.3.16**, updated **October 26, 2026**, with its installation control available. This supersedes the earlier Pending review status for 0.3.16 below.
+
+**0.3.22 is prepared for the next update; upload/submission is not yet confirmed.** Its Chrome ZIP SHA-256 is `fd20e336fa4266c008e65e13ec595bc631ce7e6610c7ae9141da97d0151693c8`. The hosted privacy disclosure has been updated and read back; [RELEASE_0.3.22.md](RELEASE_0.3.22.md) records qualification and its live-testing limits. Version 0.3.21 is superseded locally by the additional cross-conversation Restore guard.
+
+## Historical October 25–26 verification
+
 Latest public-listing verification: **October 25, 2026, America/Los_Angeles**.
 
 **Version 0.3.15 is publicly available.** The [Threadlane Store listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei) shows version **0.3.15**, updated **October 23, 2026**. This supersedes the older pending-review observation below.

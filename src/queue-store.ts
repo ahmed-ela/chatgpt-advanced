@@ -10,6 +10,7 @@ export const QUEUE_SEND_TIMEOUT_MS = 30_000;
 export const QUEUE_BUSY_MS = 3_000;
 export const QUEUE_MAX_TEXT = 200_000;
 export const QUEUE_MAX_ITEMS = 100;
+export const QUEUE_MAX_DRAFTS = 20;
 const MAX_CONVERSATION_ALIASES = 16;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -28,6 +29,13 @@ export interface QueueItem {
   lastEditToken?: string;
   sendNow?: boolean;
 }
+/** Recoverable composer text while a queued send temporarily borrows its editor. */
+export interface QueueDraft {
+  id: string;
+  text: string;
+  revision: number;
+  updatedAt: number;
+}
 export interface QueueState {
   key: string;
   revision: number;
@@ -38,8 +46,9 @@ export interface QueueState {
   lastCompletedUserMessageId?: string;
   /** Exact first-send identity witnesses; never inferred from a queue anchor. */
   conversationAliases?: ConversationAlias[];
+  drafts?: QueueDraft[];
 }
-export type QueueAction = "read" | "bind-conversation" | "enqueue" | "begin-edit" | "edit-heartbeat" | "cancel-edit" | "steer" | "edit" | "move" | "remove" | "pause" | "heartbeat" | "claim" | "attempt" | "ack" | "anchor" | "complete" | "release" | "review" | "retry";
+export type QueueAction = "read" | "bind-conversation" | "draft-save" | "draft-remove" | "enqueue" | "begin-edit" | "edit-heartbeat" | "cancel-edit" | "steer" | "edit" | "move" | "remove" | "pause" | "heartbeat" | "claim" | "attempt" | "ack" | "anchor" | "complete" | "release" | "review" | "retry";
 export interface QueueRequest {
   type: typeof QUEUE_MESSAGE_TYPE;
   key: string;
@@ -55,6 +64,7 @@ export interface QueueRequest {
   reason?: string;
   editToken?: string;
   conversationAlias?: ConversationAlias;
+  draftRevision?: number;
 }
 export type QueueResponse = { ok: true; state: QueueState; claimed?: QueueItem } | { ok: false; error: string };
 interface StoredQueue extends QueueState {
@@ -62,6 +72,7 @@ interface StoredQueue extends QueueState {
   editReceipts?: Array<{ id: string; editToken: string; text: string }>;
   busyLeases?: Array<{ owner: string; until: number }>;
   legacyBusyUntil?: number;
+  removedDraftRevisions?: Array<{ id: string; revision: number }>;
 }
 export interface QueueResult { state: QueueState; claimed?: QueueItem; changed: boolean }
 
@@ -85,6 +96,30 @@ function validateStoredConversationAliases(state: StoredQueue): void {
       aliases.some(alias => !isValidConversationAlias(alias) || alias.routeKey !== state.key) ||
       aliases.some((alias, index) => aliases.slice(0, index).some(previous => conflictingConversationAlias(alias, previous)))) {
     throw new Error("Stored conversation identity is invalid. Existing queue data has been preserved.");
+  }
+}
+
+function validDraftId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9:_-]{1,128}$/.test(value);
+}
+
+function validDraftRevision(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function validateStoredDrafts(state: StoredQueue): void {
+  const drafts = state.drafts;
+  const removed = state.removedDraftRevisions;
+  if ((drafts !== undefined && (!Array.isArray(drafts) || drafts.length > QUEUE_MAX_DRAFTS ||
+      drafts.some(draft => !draft || typeof draft !== "object" || Array.isArray(draft) ||
+        !validDraftId(draft.id) || typeof draft.text !== "string" || draft.text.length > QUEUE_MAX_TEXT ||
+        !validDraftRevision(draft.revision) || !Number.isSafeInteger(draft.updatedAt) || draft.updatedAt < 0) ||
+      new Set(drafts.map(draft => draft.id)).size !== drafts.length)) ||
+      (removed !== undefined && (!Array.isArray(removed) || removed.some(receipt => !receipt || typeof receipt !== "object" ||
+        Array.isArray(receipt) || !validDraftId(receipt.id) || !validDraftRevision(receipt.revision)) ||
+        new Set(removed.map(receipt => receipt.id)).size !== removed.length ||
+        drafts?.some(draft => removed.some(receipt => receipt.id === draft.id && receipt.revision >= draft.revision))))) {
+    throw new Error("Stored composer drafts are invalid. Existing queue data has been preserved.");
   }
 }
 
@@ -127,13 +162,14 @@ export class QueueStore {
       () => ({ key: request.key, revision: 0, paused: false, items: [], busyLeases: [] }),
       state => {
         validateStoredConversationAliases(state);
+        validateStoredDrafts(state);
         const before = JSON.stringify(state);
         recover(state, now);
         const claimed = mutate(state, request, owner, now);
         const changed = JSON.stringify(state) !== before;
         if (changed) state.revision += 1;
         // Receipts and per-tab busy ownership stay private to the worker.
-        const { retiredIds: _retiredIds, editReceipts: _editReceipts,
+        const { retiredIds: _retiredIds, removedDraftRevisions: _removedDraftRevisions, editReceipts: _editReceipts,
           busyLeases: _busyLeases, legacyBusyUntil: _legacyBusyUntil, ...visible } = state;
         const result: QueueResult = { state: structuredClone(visible), changed,
           ...(claimed ? { claimed: structuredClone(claimed) } : {}) };
@@ -145,7 +181,7 @@ export class QueueStore {
 function validateRequest(request: QueueRequest): void {
   if (!request || request.type !== QUEUE_MESSAGE_TYPE || typeof request.key !== "string" || request.key.length > 2_048 || !/^(chatgpt|claude|gemini|fixture):/.test(request.key)) throw new Error("Invalid queue conversation");
   if (typeof request.clientId !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.clientId)) throw new Error("Invalid queue client");
-  if (!["read", "bind-conversation", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "anchor", "complete", "release", "review", "retry"].includes(request.action)) throw new Error("Unknown queue action");
+  if (!["read", "bind-conversation", "draft-save", "draft-remove", "enqueue", "begin-edit", "edit-heartbeat", "cancel-edit", "steer", "edit", "move", "remove", "pause", "heartbeat", "claim", "attempt", "ack", "anchor", "complete", "release", "review", "retry"].includes(request.action)) throw new Error("Unknown queue action");
   if (request.conversationAlias !== undefined && (!isValidConversationAlias(request.conversationAlias) || request.conversationAlias.routeKey !== request.key)) throw new Error("Invalid conversation identity witness");
   if (request.action === "bind-conversation" && !request.conversationAlias) throw new Error("Missing conversation identity witness");
   if (request.id !== undefined && (typeof request.id !== "string" || !/^[A-Za-z0-9:_-]{1,128}$/.test(request.id))) throw new Error("Invalid queued message ID");
@@ -153,9 +189,18 @@ function validateRequest(request: QueueRequest): void {
   if (["begin-edit", "edit-heartbeat", "cancel-edit"].includes(request.action) && !request.editToken) throw new Error("Missing queue edit token");
   if (request.afterUserMessageId !== undefined && (typeof request.afterUserMessageId !== "string" || !request.afterUserMessageId || request.afterUserMessageId.length > 256)) throw new Error("Invalid queue transcript anchor");
   if (["enqueue", "edit"].includes(request.action) && (typeof request.text !== "string" || !request.text.trim() || request.text.length > QUEUE_MAX_TEXT)) throw new Error(`Queued messages must contain 1–${QUEUE_MAX_TEXT.toLocaleString()} characters`);
+  if (["draft-save", "draft-remove"].includes(request.action) && (!validDraftId(request.id) || !validDraftRevision(request.draftRevision))) throw new Error("Invalid composer draft ID or revision");
+  if (request.action === "draft-save" && (typeof request.text !== "string" || request.text.length > QUEUE_MAX_TEXT)) throw new Error(`Composer drafts must contain at most ${QUEUE_MAX_TEXT.toLocaleString()} characters`);
 }
 
 function recover(state: StoredQueue, now: number): void {
+  // A cleared buffer is a retired revision, not a recoverable draft. Older
+  // builds could leave an empty journal entry if their final cleanup was
+  // interrupted. Migrate it in this same durable CAS transaction; retaining
+  // the receipt prevents an older delayed save from resurrecting its text.
+  for (const draft of state.drafts ?? []) {
+    if (draft.text === "") retireDraft(state, draft.id, draft.revision);
+  }
   for (const item of state.items) {
     if (item.status === "editing" && (item.leaseUntil ?? 0) <= now) {
       resetToQueued(item);
@@ -171,6 +216,13 @@ function recover(state: StoredQueue, now: number): void {
     }
   }
   refreshBusyUntil(state, now);
+}
+
+function retireDraft(state: StoredQueue, id: string, revision: number): void {
+  state.drafts = (state.drafts ?? []).filter(draft => draft.id !== id || draft.revision > revision);
+  const previous = state.removedDraftRevisions?.find(receipt => receipt.id === id);
+  state.removedDraftRevisions = [...(state.removedDraftRevisions ?? []).filter(receipt => receipt.id !== id),
+    { id, revision: Math.max(previous?.revision ?? 0, revision) }];
 }
 
 function refreshBusyUntil(state: StoredQueue, now: number): void {
@@ -207,6 +259,37 @@ function mutate(state: StoredQueue, request: QueueRequest, owner: string, now: n
   };
   switch (request.action) {
     case "read": return;
+    case "draft-save": {
+      // An old retry must not resurrect text already recovered. Newer typing
+      // may still arrive after removal and must survive that cross-tab race.
+      const removed = state.removedDraftRevisions?.find(receipt => receipt.id === request.id);
+      if (removed && request.draftRevision! <= removed.revision) return;
+      const drafts = state.drafts ?? [];
+      const current = drafts.find(draft => draft.id === request.id);
+      if (current && request.draftRevision! < current.revision) return;
+      if (current && request.draftRevision === current.revision) {
+        if (request.text !== current.text) throw new Error("Composer draft revision conflicts with saved text");
+        return;
+      }
+      if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid composer draft timestamp");
+      if (request.text === "") {
+        // Empty focused inputs and a buffer cleared after enqueue need no
+        // recovery slot. Record retirement even when no draft existed yet,
+        // and before enforcing the nonempty-draft capacity limit.
+        retireDraft(state, request.id!, request.draftRevision!);
+        return;
+      }
+      if (!current && drafts.length >= QUEUE_MAX_DRAFTS) throw new Error(`Saved composer drafts are full (${QUEUE_MAX_DRAFTS}); recover an existing draft before sending`);
+      const next = { id: request.id!, text: request.text!, revision: request.draftRevision!, updatedAt: now };
+      state.drafts = current ? drafts.map(draft => draft.id === current.id ? next : draft) : [...drafts, next];
+      return;
+    }
+    case "draft-remove": {
+      const current = state.drafts?.find(draft => draft.id === request.id);
+      if (!current || current.revision !== request.draftRevision) return;
+      retireDraft(state, current.id, current.revision);
+      return;
+    }
     case "bind-conversation": {
       const alias = request.conversationAlias!;
       const aliases = state.conversationAliases ?? [];

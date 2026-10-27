@@ -1,12 +1,12 @@
 # Threadlane privacy policy
 
-Last updated: 2026-10-22
+Last updated: 2026-10-27
 
 Threadlane adds annotations and a message queue to ChatGPT, Claude, and Gemini. This policy describes the packaged extension; local development builds also use a local development server.
 
 ## Information used
 
-The extension reads the supported conversation's page content, conversation and message identifiers, composer contents, and send/response state to attach notes and deliver queued messages. When you save a note, it stores your selected quote, comment, nearby text needed to locate the highlight, a short message excerpt, identifiers, and a timestamp. When you queue a message, it stores that message's text, order, pause state, identifiers, and delivery/edit coordination state.
+The extension reads the supported conversation's page content, conversation and message identifiers, composer contents, and send/response state to attach notes and deliver queued messages. When you save a note, it stores your selected quote, comment, nearby text needed to locate the highlight, a short message excerpt, identifiers, and a timestamp. When you queue a message, it stores that message's text, order, pause state, identifiers, and delivery/edit coordination state. If a queued message sends while you are writing, the extension also saves an encrypted local backup of your unfinished draft while it temporarily uses the native composer.
 
 It does not collect general browsing history, passwords, authentication cookies, payment details, or account profiles. Your notes or messages may themselves contain personal information you choose to include. The extension does not run on unrelated websites.
 
@@ -16,7 +16,7 @@ Notes and queues are stored in the extension's own IndexedDB databases in your c
 
 Older versions saved notes in the supported site's local storage. When those notes are encountered, the extension imports them into its own database. It removes the old local copy only after the import succeeds. If import fails, the original remains available for a later retry.
 
-When you choose Insert, annotation text is placed in the provider's native composer. When a queued message sends, the extension submits it through that same composer to the provider you are using: OpenAI for ChatGPT, Anthropic for Claude, or Google for Gemini. The provider's own terms and privacy policy govern that submitted content. The extension does not call a separate AI API or send the text to the publisher. Automatic sending requires an open, running supported conversation and a ready, empty composer. ChatGPT and Claude can continue sending in a background tab; Gemini may wait until its response animation finishes when the tab becomes visible.
+When you choose Insert, annotation text is placed in the provider's native composer. When a queued message sends, the extension submits it through that same composer to the provider you are using: OpenAI for ChatGPT, Anthropic for Claude, or Google for Gemini. The provider's own terms and privacy policy govern that submitted content. The extension does not call a separate AI API or send the text to the publisher. Automatic sending requires an open, running supported conversation and a ready composer. Plain-text drafts are preserved while queued messages send; attachments, formatted drafts, and active character composition keep their protective holds. ChatGPT and Claude can continue sending in a background tab; Gemini may wait until its response animation finishes when the tab becomes visible.
 
 The Firefox installation declares personal communications and website content in its required data permissions because these features can submit your queued messages and selected quotes to the chosen AI provider. These permissions do not enable publisher analytics or telemetry. The Firefox build does not run in private browsing windows.
 
@@ -28,7 +28,7 @@ The update and download hosts receive ordinary connection information, including
 
 ## Retention and deletion
 
-Saved notes remain until you delete them or successfully insert them into the native composer with the blue arrow. Successful insertion removes only the transferred reply batch; blocked or failed insertion retains the notes, and newer edits are preserved. The inserted text remains in the provider's composer for you to review and send. Queued text remains while pending, uncertain, or awaiting its response, and is removed from the active queue after completion or explicit deletion. To recognize retries after a lost save response, the queue may retain the text of up to 20 recently edited, retired messages per conversation until those recovery records are replaced or extension storage is cleared. Non-content identifiers and deletion records may remain to prevent duplicate sends or reimporting deleted notes.
+Saved notes remain until you delete them or successfully insert them into the native composer with the blue arrow. Successful insertion removes only the transferred reply batch; blocked or failed insertion retains the notes, and newer edits are preserved. The inserted text remains in the provider's composer for you to review and send. Queued text remains while pending, uncertain, or awaiting its response, and is removed from the active queue after completion or explicit deletion. To recognize retries after a lost save response, the queue may retain the text of up to 20 recently edited, retired messages per conversation until those recovery records are replaced or extension storage is cleared. Draft backups are removed after successful restoration; if restoration fails, the saved unsent draft remains available for recovery. Non-content identifiers and deletion records may remain to prevent duplicate sends or reimporting deleted notes.
 
 You can edit or delete notes and pending queue items in the extension interface. Removing a local note or queue item does not delete messages already submitted to an AI provider. Clearing the extension's storage or uninstalling the extension removes its local databases. An unimported legacy copy remains in the relevant site's storage until successfully imported or that site's storage is cleared. There is currently no built-in export or cloud backup.
 

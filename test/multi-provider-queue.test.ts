@@ -22,6 +22,7 @@ interface Tab {
   pendingGeminiUser?: HTMLElement;
   pendingGeminiIndex?: number;
   failNextRequest?: { action: QueueRequest["action"]; message: string };
+  beforeRequest?: (request: QueueRequest) => void | Promise<void>;
   listener?: (message: { type: string; key: string }) => void;
 }
 const chatId = "e284b3373d6e5bc6";
@@ -121,6 +122,7 @@ async function createTab(provider: Provider, initialize?: (tab: Tab) => void): P
     async sendMessage(raw: unknown) {
       const request = raw as QueueRequest;
       if (request.key !== tab.key) throw new Error("Wrong conversation key");
+      await tab.beforeRequest?.(request);
       if (tab.failNextRequest?.action === request.action) {
         const message = tab.failNextRequest.message;
         delete tab.failNextRequest;
@@ -356,6 +358,77 @@ describe("Claude and Gemini persistent queues", () => {
       expect(tab.composer.innerText).toBe("My unrelated draft");
       expect((await saved(tab)).items[0]?.status).toBe("queued");
       expect(tab.sent).toEqual([]); expect(tab.stops).toBe(0);
+    });
+
+    for (const visibility of ["visible", "hidden"] as const) {
+      test(`${provider}: ${visibility} auto-send drains while preserving a multiline native draft`, async () => {
+        const tab = await createTab(provider);
+        await enqueue(tab, "First queued message");
+        await enqueue(tab, "Second queued message");
+        const text = "  A draft still being written\n\nwith another line  ";
+        draft(tab, text); tab.composer.focus();
+        Object.defineProperty(tab.doc, "visibilityState", { value: visibility, configurable: true });
+        tab.doc.dispatchEvent(new tab.dom.Event("visibilitychange") as unknown as Event);
+        finish(tab); now += 4000; await dispatchReady(tab);
+        expect(tab.sent).toEqual(["First queued message"]);
+        expect(tab.composer.textContent).toBe(text);
+        expect(tab.doc.activeElement).toBe(tab.composer);
+        expect(tab.doc.querySelector("[data-plannotator-queue-root='draft-buffer']")).toBeNull();
+        expect((await saved(tab)).drafts ?? []).toHaveLength(0);
+        finish(tab); now += 4000; await dispatchReady(tab);
+        expect(tab.sent).toEqual(["First queued message", "Second queued message"]);
+        expect(tab.composer.textContent).toBe(text);
+        expect(tab.stops).toBe(0);
+      });
+    }
+
+    test(`${provider}: typing during native-send preparation survives without entering the sent payload`, async () => {
+      const tab = await createTab(provider);
+      await enqueue(tab, "Queued payload only");
+      draft(tab, "Draft before send"); tab.composer.focus();
+      let edited = false;
+      tab.beforeRequest = request => {
+        if (request.action !== "attempt" || edited) return;
+        const buffer = tab.doc.querySelector("[data-plannotator-queue-root='draft-buffer']")?.shadowRoot?.querySelector("textarea");
+        expect(buffer).toBeTruthy();
+        buffer!.value = "Draft before send, and I am still typing\nNext line";
+        buffer!.setSelectionRange(9, 15, "backward");
+        buffer!.dispatchEvent(new tab.dom.InputEvent("input", { bubbles: true, composed: true }) as unknown as InputEvent);
+        edited = true;
+      };
+      finish(tab); now += 4000; await dispatchReady(tab);
+      expect(edited).toBe(true);
+      expect(tab.sent).toEqual(["Queued payload only"]);
+      expect(tab.composer.textContent).toBe("Draft before send, and I am still typing\nNext line");
+      expect(tab.doc.activeElement).toBe(tab.composer);
+      expect(tab.dom.getSelection()!.anchorOffset).toBe(15);
+      expect(tab.dom.getSelection()!.focusOffset).toBe(9);
+      expect((await saved(tab)).drafts ?? []).toHaveLength(0);
+    });
+
+    test(`${provider}: failed draft backup leaves native text intact and does not send`, async () => {
+      const tab = await createTab(provider);
+      const id = await enqueue(tab, "Keep queued if backup fails");
+      draft(tab, "Unsent draft must survive");
+      tab.beforeRequest = request => { if (request.action === "draft-save") throw new Error("Draft storage unavailable"); };
+      finish(tab); now += 4000; await dispatchReady(tab);
+      expect(tab.sent).toEqual([]);
+      expect(tab.composer.textContent).toBe("Unsent draft must survive");
+      expect((await saved(tab)).items.find(item => item.id === id)?.status).toBe("queued");
+    });
+
+    test(`${provider}: IME composition finishes before the draft is borrowed`, async () => {
+      const tab = await createTab(provider);
+      await enqueue(tab, "Send after IME commits");
+      draft(tab, "Draft composing");
+      tab.composer.dispatchEvent(new tab.dom.CompositionEvent("compositionstart", { bubbles: true, composed: true }) as unknown as Event);
+      finish(tab); now += 4000; await dispatchReady(tab);
+      expect(tab.sent).toEqual([]);
+      expect(tab.composer.textContent).toBe("Draft composing");
+      tab.composer.dispatchEvent(new tab.dom.CompositionEvent("compositionend", { bubbles: true, composed: true }) as unknown as Event);
+      await dispatchReady(tab);
+      expect(tab.sent).toEqual(["Send after IME commits"]);
+      expect(tab.composer.textContent).toBe("Draft composing");
     });
 
     test(`${provider}: an empty paused queue keeps Resume visible and captures native Enter until resumed`, async () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
-import { getQueueKey, QUEUE_BUSY_MS, QUEUE_CLAIM_MS, QUEUE_EDIT_MS, QUEUE_MESSAGE_TYPE, QUEUE_SEND_TIMEOUT_MS, QueueStore, type QueueAction, type QueueRequest } from "../src/queue-store";
+import { getQueueKey, QUEUE_BUSY_MS, QUEUE_CLAIM_MS, QUEUE_EDIT_MS, QUEUE_MAX_DRAFTS, QUEUE_MAX_TEXT, QUEUE_MESSAGE_TYPE, QUEUE_SEND_TIMEOUT_MS, QueueStore, type QueueAction, type QueueRequest } from "../src/queue-store";
 import type { ConversationAlias } from "../src/chatgpt-dom";
 import { EncryptedRecordStore } from "../src/encrypted-storage";
 
@@ -35,6 +35,312 @@ function witness(index = 1): ConversationAlias {
   return { routeKey: identityKey, localId: `local-chatgpt:cccccccc-cccc-4ccc-8ccc-${index.toString(16).padStart(12, "0")}`,
     firstUserId: "11111111-1111-4111-8111-111111111111" };
 }
+
+describe("durable composer draft journal", () => {
+  const draft = { id: "draft-a", text: " \n  Working\r\nthrough\u00a0this\t ", revision: 1, updatedAt: start };
+  const save = (revision = 1, text = draft.text, target = store, now = start) => target.apply(
+    request("draft-save", { id: draft.id, text, draftRevision: revision }), ownerA, now,
+  );
+
+  test("exact draft whitespace survives encrypted restart and another tab can recover it", async () => {
+    await enqueue("queued");
+    await store.apply(request("pause", { paused: true }), ownerA, start);
+    const saved = await save();
+    expect(saved.state.drafts).toEqual([draft]);
+    expect(saved.state.items.map(item => item.id)).toEqual(["queued"]);
+    expect(saved.state.paused).toBe(true);
+    await store.close();
+    const reopened = newStore();
+    expect((await read(reopened)).state).toEqual(saved.state);
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = factory.open("test-queue", 2);
+      open.onsuccess = () => resolve(open.result as unknown as IDBDatabase);
+      open.onerror = () => reject(open.error);
+    });
+    try {
+      const raw = await new Promise<unknown[]>((resolve, reject) => {
+        const transaction = database.transaction("encrypted-records", "readonly");
+        const read = transaction.objectStore("encrypted-records").getAll();
+        read.onsuccess = () => resolve(read.result);
+        read.onerror = () => reject(read.error);
+      });
+      expect(raw).toHaveLength(1);
+      expect(JSON.stringify(raw)).not.toContain("Working");
+      expect(raw[0]).toHaveProperty("ciphertext");
+      expect(raw[0]).not.toHaveProperty("drafts");
+    } finally { database.close(); }
+    const recovered = await reopened.apply(request("draft-remove", { id: draft.id, draftRevision: 1 }), ownerB, start + 1);
+    expect(recovered.state.drafts).toEqual([]);
+    expect(recovered.state.items).toEqual(saved.state.items);
+    expect(recovered.state.paused).toBe(true);
+    expect("removedDraftRevisions" in recovered.state).toBe(false);
+  });
+
+  test("whitespace-only drafts and the exact text limit are preserved", async () => {
+    for (const text of [" \r\n\t ", "x".repeat(QUEUE_MAX_TEXT)]) {
+      const revision = (await read()).state.drafts?.[0]?.revision ?? 0;
+      expect((await save(revision + 1, text)).state.drafts?.[0]?.text).toBe(text);
+    }
+  });
+
+  test("empty draft revisions retire atomically across restart without stale text resurrection", async () => {
+    await save(1, "Before buffered Enter");
+    const retired = await save(2, "");
+    expect(retired.state.drafts).toEqual([]);
+    await store.close();
+    const reopened = newStore();
+    expect((await read(reopened)).state).toEqual(retired.state);
+    for (const revision of [1, 2]) {
+      const stale = await save(revision, "Before buffered Enter", reopened);
+      expect(stale.changed).toBe(false);
+      expect(stale.state).toEqual(retired.state);
+    }
+    expect((await save(3, "Typing after buffered Enter", reopened)).state.drafts?.[0]?.text).toBe("Typing after buffered Enter");
+  });
+
+  test("initial empty draft revisions do not consume recovery capacity", async () => {
+    const empty = await save(1, "");
+    expect(empty.state.drafts ?? []).toEqual([]);
+    expect((await save(1, "stale same-revision text")).state).toEqual(empty.state);
+    for (let index = 0; index < QUEUE_MAX_DRAFTS; index++) {
+      await store.apply(request("draft-save", { id: `full-${index}`, text: `keep-${index}`, draftRevision: 1 }), ownerA, start);
+    }
+    const full = (await read()).state;
+    const atCapacity = await store.apply(request("draft-save", { id: "empty-at-capacity", text: "", draftRevision: 1 }), ownerA, start);
+    expect(atCapacity.state.drafts).toEqual(full.drafts);
+    await expect(store.apply(request("draft-save", { id: "nonempty-at-capacity", text: "keep", draftRevision: 1 }), ownerA, start)).rejects.toThrow("drafts are full");
+    const cleared = await store.apply(request("draft-save", { id: "full-0", text: "", draftRevision: 2 }), ownerA, start + 1);
+    expect(cleared.state.drafts).toHaveLength(QUEUE_MAX_DRAFTS - 1);
+    expect((await store.apply(request("draft-save", { id: "full-0", text: "keep-0", draftRevision: 1 }), ownerB, start + 2)).state).toEqual(cleared.state);
+    expect((await store.apply(request("draft-save", { id: "new-draft", text: "keep", draftRevision: 1 }), ownerB, start + 3)).state.drafts).toHaveLength(QUEUE_MAX_DRAFTS);
+  });
+
+  test.each(["read", "heartbeat"] as const)("legacy empty drafts retire during %s without changing nonempty drafts or queue state", async action => {
+    const retained = { ...draft, id: "retained" };
+    const whitespace = { ...draft, id: "whitespace", text: " \n\t " };
+    const legacy = { key, revision: 7, paused: true, items: [{ id: "queued", text: "keep queued", createdAt: start, status: "queued" as const }],
+      lastCompletedUserMessageId: "completed-user", busyLeases: [],
+      drafts: [{ ...draft, text: "", revision: 3 }, retained, whitespace] };
+    const raw = new EncryptedRecordStore<typeof legacy>(factory, "test-queue", "queues");
+    try {
+      await raw.apply(key, () => legacy, value => ({ value, result: undefined, changed: true }));
+      const recovered = await store.apply(request(action, { busy: false }), ownerA, start);
+      expect(recovered.changed).toBe(true);
+      expect(recovered.state.drafts).toEqual([retained, whitespace]);
+      expect(recovered.state.items).toEqual(legacy.items);
+      expect(recovered.state.paused).toBe(true);
+      expect(recovered.state.lastCompletedUserMessageId).toBe(legacy.lastCompletedUserMessageId);
+      await store.close();
+      const reopened = newStore();
+      expect((await save(2, "stale pre-clear draft", reopened)).state).toEqual(recovered.state);
+      expect((await save(3, "stale cleared revision", reopened)).state).toEqual(recovered.state);
+      expect((await read(reopened)).changed).toBe(false);
+      expect((await save(4, "new typing survives recovery", reopened)).state.drafts?.find(entry => entry.id === draft.id)?.text).toBe("new typing survives recovery");
+    } finally { await raw.close(); }
+  });
+
+  test("empty draft retirement and concurrent newer typing preserve the latest nonempty revision", async () => {
+    const other = newStore();
+    for (let index = 0; index < 8; index++) {
+      const id = `empty-race-${index}`;
+      await store.apply(request("draft-save", { id, text: "before", draftRevision: 1 }), ownerA, start);
+      await Promise.all([
+        store.apply(request("draft-save", { id, text: "", draftRevision: 2 }), ownerA, start + 1),
+        other.apply(request("draft-save", { id, text: "new typing", draftRevision: 3 }), ownerB, start + 2),
+      ]);
+      expect((await read()).state.drafts?.find(entry => entry.id === id)).toEqual({ id, text: "new typing", revision: 3, updatedAt: start + 2 });
+      const stale = await store.apply(request("draft-save", { id, text: "", draftRevision: 2 }), ownerA, start + 3);
+      expect(stale.changed).toBe(false);
+      expect(stale.state.drafts?.find(entry => entry.id === id)?.text).toBe("new typing");
+    }
+  });
+
+  test("legacy empty draft migration and concurrent newer typing share the same CAS boundary", async () => {
+    const legacy = { key, revision: 7, paused: false, items: [], busyLeases: [], drafts: [{ ...draft, text: "", revision: 2 }] };
+    const raw = new EncryptedRecordStore<typeof legacy>(factory, "test-queue", "queues");
+    try {
+      await raw.apply(key, () => legacy, value => ({ value, result: undefined, changed: true }));
+      const other = newStore();
+      await Promise.all([read(store), save(3, "Typing races migration", other, start + 1)]);
+      const result = (await read()).state;
+      expect(result.drafts).toEqual([{ ...draft, revision: 3, text: "Typing races migration", updatedAt: start + 1 }]);
+      expect((await save(2, "", store, start + 2)).state).toEqual(result);
+      expect((await save(1, "Stale text before clearing", other, start + 3)).state).toEqual(result);
+    } finally { await raw.close(); }
+  });
+
+  test("empty draft retirement failure keeps prior committed text intact", async () => {
+    await save(1, "Keep this text if clearing cannot commit");
+    const before = (await read()).state;
+    const originalPut = IDBObjectStore.prototype.put;
+    try {
+      IDBObjectStore.prototype.put = function () { throw new DOMException("Draft disk quota exhausted", "QuotaExceededError"); };
+      await expect(save(2, "")).rejects.toThrow("Draft disk quota exhausted");
+    } finally { IDBObjectStore.prototype.put = originalPut; }
+    expect((await read()).state).toEqual(before);
+    expect((await save(2, "")).state.drafts).toEqual([]);
+  });
+
+  test("legacy empty draft migration failure preserves authenticated data for a later retry", async () => {
+    const legacy = { key, revision: 7, paused: false, items: [], busyLeases: [], drafts: [{ ...draft, text: "" }, { ...draft, id: "retained" }] };
+    const raw = new EncryptedRecordStore<typeof legacy>(factory, "test-queue", "queues");
+    const originalPut = IDBObjectStore.prototype.put;
+    try {
+      await raw.apply(key, () => legacy, value => ({ value, result: undefined, changed: true }));
+      IDBObjectStore.prototype.put = function () { throw new DOMException("Migration disk failure", "QuotaExceededError"); };
+      await expect(read()).rejects.toThrow("Migration disk failure");
+      IDBObjectStore.prototype.put = originalPut;
+      expect(await raw.apply(key, () => legacy, value => ({ value, result: value, changed: false }))).toEqual(legacy);
+      expect((await read()).state.drafts).toEqual([{ ...draft, id: "retained" }]);
+    } finally { IDBObjectStore.prototype.put = originalPut; await raw.close(); }
+  });
+
+  test("stale updates and removals cannot overwrite newer typing or alter its revision", async () => {
+    await save();
+    const latest = await save(3, "latest text", store, start + 3);
+    expect(latest.state.drafts).toEqual([{ ...draft, revision: 3, text: "latest text", updatedAt: start + 3 }]);
+    for (const result of [
+      await save(2, "stale text", store, start + 4),
+      await save(3, "latest text", store, start + 5),
+      await store.apply(request("draft-remove", { id: draft.id, draftRevision: 2 }), ownerB, start + 6),
+      await store.apply(request("draft-remove", { id: draft.id, draftRevision: 4 }), ownerB, start + 7),
+    ]) {
+      expect(result.changed).toBe(false);
+      expect(result.state).toEqual(latest.state);
+    }
+    await expect(save(3, "conflicting text")).rejects.toThrow("revision conflicts");
+    expect((await read()).state).toEqual(latest.state);
+  });
+
+  test("removal receipts prevent stale save resurrection after restart but preserve later typing", async () => {
+    await save(2, "restored draft");
+    const removed = await store.apply(request("draft-remove", { id: draft.id, draftRevision: 2 }), ownerB, start);
+    await store.close();
+    const reopened = newStore();
+    for (const revision of [1, 2]) {
+      const retried = await save(revision, "old retry", reopened);
+      expect(retried.changed).toBe(false);
+      expect(retried.state).toEqual(removed.state);
+    }
+    expect((await save(3, "typed after recovery", reopened)).state.drafts).toEqual([
+      { ...draft, revision: 3, text: "typed after recovery" },
+    ]);
+    expect((await reopened.apply(request("draft-remove", { id: draft.id, draftRevision: 2 }), ownerB, start)).changed).toBe(false);
+  });
+
+  test("independent CAS writers preserve every draft and the highest revision", async () => {
+    const other = newStore();
+    await Promise.all(Array.from({ length: QUEUE_MAX_DRAFTS }, (_, index) => (index % 2 ? other : store).apply(
+      request("draft-save", { id: `draft-${index}`, text: `text-${index}`, draftRevision: 1 }), ownerA, start,
+    )));
+    await Promise.all(Array.from({ length: 16 }, (_, index) => (index % 2 ? other : store).apply(
+      request("draft-save", { id: "draft-0", text: `revision-${index + 2}`, draftRevision: index + 2 }), ownerB, start + index,
+    )));
+    const state = (await read()).state;
+    expect(state.drafts).toHaveLength(QUEUE_MAX_DRAFTS);
+    expect(new Set(state.drafts?.map(entry => entry.id)).size).toBe(QUEUE_MAX_DRAFTS);
+    expect(state.drafts?.find(entry => entry.id === "draft-0")).toEqual({ id: "draft-0", text: "revision-17", revision: 17, updatedAt: start + 15 });
+    expect(state.drafts?.filter(entry => entry.id !== "draft-0").every(entry => entry.text === `text-${entry.id.slice(6)}`)).toBe(true);
+  });
+
+  test("a concurrent save and older removal never lose newer text", async () => {
+    const other = newStore();
+    for (let index = 0; index < 8; index++) {
+      const id = `racing-${index}`;
+      await store.apply(request("draft-save", { id, text: "before", draftRevision: 1 }), ownerA, start);
+      await Promise.all([
+        store.apply(request("draft-remove", { id, draftRevision: 1 }), ownerB, start + 1),
+        other.apply(request("draft-save", { id, text: "new typing", draftRevision: 2 }), ownerA, start + 2),
+      ]);
+      expect((await read()).state.drafts?.find(entry => entry.id === id)).toEqual({ id, text: "new typing", revision: 2, updatedAt: start + 2 });
+    }
+  });
+
+  test("same-revision CAS conflicts accept one writer without silently replacing text", async () => {
+    const other = newStore();
+    const results = await Promise.allSettled([save(1, "first", store), save(1, "second", other)]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    const winner = results.find(result => result.status === "fulfilled");
+    if (winner?.status !== "fulfilled") throw new Error("No draft save committed");
+    expect((await read()).state).toEqual(winner.value.state);
+  });
+
+  test("the draft bound fails closed under CAS without pruning existing recovery text", async () => {
+    const other = newStore();
+    const results = await Promise.allSettled(Array.from({ length: QUEUE_MAX_DRAFTS + 1 }, (_, index) => (index % 2 ? other : store).apply(
+      request("draft-save", { id: `draft-${index}`, text: `recover-${index}`, draftRevision: 1 }), ownerA, start,
+    )));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(QUEUE_MAX_DRAFTS);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    const before = (await read()).state;
+    await expect(save()).rejects.toThrow("drafts are full");
+    expect((await read()).state).toEqual(before);
+    const existing = before.drafts![0]!;
+    const changed = await store.apply(request("draft-save", { id: existing.id, text: "continued typing", draftRevision: 2 }), ownerB, start + 1);
+    expect(changed.state.drafts).toHaveLength(QUEUE_MAX_DRAFTS);
+    await store.apply(request("draft-remove", { id: existing.id, draftRevision: 2 }), ownerB, start + 2);
+    expect((await save()).state.drafts).toHaveLength(QUEUE_MAX_DRAFTS);
+  });
+
+  test("invalid requests fail before altering either draft backups or queued messages", async () => {
+    await enqueue("queued"); await save();
+    const before = (await read()).state;
+    for (const fields of [
+      { id: undefined }, { id: "" }, { id: "bad id" }, { id: "x".repeat(129) },
+      ...[undefined, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "2"].map(draftRevision => ({ draftRevision })),
+    ]) {
+      for (const action of ["draft-save", "draft-remove"] as const) {
+        await expect(store.apply(request(action, { id: draft.id, draftRevision: 2, text: "new text", ...fields } as Partial<QueueRequest>), ownerA, start)).rejects.toThrow();
+      }
+    }
+    for (const text of [undefined, null, 2, "x".repeat(QUEUE_MAX_TEXT + 1)]) {
+      await expect(store.apply(request("draft-save", { id: draft.id, draftRevision: 2, text: text as string }), ownerA, start)).rejects.toThrow();
+    }
+    for (const now of [-1, NaN, Infinity, 1.5]) await expect(save(2, "new text", store, now)).rejects.toThrow("timestamp");
+    expect((await read()).state).toEqual(before);
+  });
+
+  test("journal write failure preserves its prior committed text and queued send", async () => {
+    await enqueue("queued"); await save();
+    const before = (await read()).state;
+    const originalPut = IDBObjectStore.prototype.put;
+    try {
+      IDBObjectStore.prototype.put = function () { throw new DOMException("Draft disk quota exhausted", "QuotaExceededError"); };
+      await expect(save(2, "not committed")).rejects.toThrow("Draft disk quota exhausted");
+      await expect(store.apply(request("draft-remove", { id: draft.id, draftRevision: 1 }), ownerB, start)).rejects.toThrow("Draft disk quota exhausted");
+    } finally { IDBObjectStore.prototype.put = originalPut; }
+    expect((await read()).state).toEqual(before);
+  });
+
+  test.each([
+    ["non-array", { drafts: null }], ["malformed draft", { drafts: [null] }],
+    ["missing fields", { drafts: [{}] }], ["bad id", { drafts: [{ ...draft, id: "bad id" }] }],
+    ["bad text", { drafts: [{ ...draft, text: 1 }] }],
+    ["too long", { drafts: [{ ...draft, text: "x".repeat(QUEUE_MAX_TEXT + 1) }] }],
+    ["fractional revision", { drafts: [{ ...draft, revision: 1.5 }] }],
+    ["unsafe revision", { drafts: [{ ...draft, revision: Number.MAX_SAFE_INTEGER + 1 }] }],
+    ["zero revision", { drafts: [{ ...draft, revision: 0 }] }],
+    ["bad timestamp", { drafts: [{ ...draft, updatedAt: -1 }] }],
+    ["duplicate id", { drafts: [draft, draft] }],
+    ["too many", { drafts: Array.from({ length: QUEUE_MAX_DRAFTS + 1 }, (_, index) => ({ ...draft, id: `draft-${index}` })) }],
+    ["bad receipts", { removedDraftRevisions: null }],
+    ["bad receipt id", { removedDraftRevisions: [{ id: "bad id", revision: 1 }] }],
+    ["bad receipt revision", { removedDraftRevisions: [{ id: draft.id, revision: 0 }] }],
+    ["duplicate receipts", { removedDraftRevisions: [{ id: draft.id, revision: 1 }, { id: draft.id, revision: 2 }] }],
+    ["already removed", { drafts: [draft], removedDraftRevisions: [{ id: draft.id, revision: 1 }] }],
+  ])("malformed stored drafts (%s) fail closed and preserve the authenticated data", async (_description, fields) => {
+    const stored = { key, revision: 4, paused: false, items: [{ id: "queued", text: "keep", createdAt: start, status: "queued" }], ...fields };
+    const raw = new EncryptedRecordStore<typeof stored>(factory, "test-queue", "queues");
+    try {
+      await raw.apply(key, () => stored, value => ({ value, result: undefined, changed: true }));
+      for (const action of ["read", "claim", "draft-save", "draft-remove"] as const) {
+        await expect(store.apply(request(action, { id: draft.id, text: "new draft", draftRevision: 2 }), ownerA, start)).rejects.toThrow("Stored composer drafts are invalid");
+      }
+      expect(await raw.apply(key, () => stored, value => ({ value, result: value, changed: false }))).toEqual(stored);
+    } finally { await raw.close(); }
+  });
+});
 
 
 describe("persistent AI conversation queue", () => {
