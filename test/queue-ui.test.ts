@@ -118,6 +118,23 @@ function draft(tab: Tab, text: string): void {
   tab.composer.textContent = text;
   tab.composer.dispatchEvent(new tab.dom.InputEvent("input", { bubbles: true, composed: true }) as unknown as InputEvent);
 }
+function draftBuffer(tab: Tab): HTMLTextAreaElement | null {
+  return tab.doc.querySelector('[data-plannotator-queue-root="draft-buffer"]')?.shadowRoot?.querySelector("textarea") ?? null;
+}
+function typeInBuffer(tab: Tab, text: string): HTMLTextAreaElement {
+  const buffer = draftBuffer(tab);
+  if (!buffer) throw new Error("Expected the protected draft input");
+  buffer.value = text;
+  buffer.dispatchEvent(new tab.dom.InputEvent("input", { bubbles: true, composed: true }) as unknown as InputEvent);
+  return buffer;
+}
+function enterBuffer(tab: Tab): boolean {
+  const buffer = draftBuffer(tab);
+  if (!buffer) throw new Error("Expected the protected draft input");
+  return buffer.dispatchEvent(new tab.dom.KeyboardEvent("keydown", {
+    key: "Enter", bubbles: true, composed: true, cancelable: true,
+  }) as unknown as KeyboardEvent);
+}
 function enter(tab: Tab, options: { shiftKey?: boolean; isComposing?: boolean } = {}): boolean {
   return tab.composer.dispatchEvent(new tab.dom.KeyboardEvent("keydown", {
     key: "Enter", bubbles: true, composed: true, cancelable: true, ...options,
@@ -219,6 +236,101 @@ function simulateNativeChat(tab: Tab, renderUser?: (bubble: HTMLElement, text: s
   return result;
 }
 
+/**
+ * ProseMirror sends its editor state, not textContent. Its blur/focus handlers
+ * stop/start the DOM observer; stop() takes pending mutations and schedules a
+ * flush 20ms later. Blurring before the mutation checkpoint can therefore leave
+ * matching DOM while Send still reads the prior document.
+ * https://github.com/ProseMirror/prosemirror-view/blob/master/src/domobserver.ts
+ * https://github.com/ProseMirror/prosemirror-view/blob/master/src/input.ts
+ */
+function simulateObserverBackedNativeChat(tab: Tab): {
+  sent: string[]; model: () => string; deferredBlurs: string[]; flush: () => void; finish: () => void; close: () => void;
+} {
+  let model = tab.composer.textContent ?? "";
+  let pending = false;
+  let pendingAnswer: HTMLElement | null = null;
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const abort = new tab.dom.AbortController();
+  const options = { signal: abort.signal };
+  const result = {
+    sent: [] as string[], model: () => model, deferredBlurs: [] as string[],
+    flush: () => {
+      if (!pending) return;
+      pending = false; model = tab.composer.textContent ?? "";
+    },
+    finish: () => {
+      if (pendingAnswer) {
+        pendingAnswer.setAttribute("data-chatgpt-selection-message-id", crypto.randomUUID());
+        pendingAnswer.insertAdjacentHTML("beforeend", '<div class="turn-action-controls"><button aria-label="Copy">Copy</button><button aria-label="Rate response">Rate</button></div>');
+        pendingAnswer = null;
+      }
+      busy(tab, false);
+    },
+    close: () => { observer.disconnect(); abort.abort(); for (const timer of timers) clearTimeout(timer); },
+  };
+  const observer = new tab.dom.MutationObserver(records => {
+    if (records.length) pending = true;
+    result.flush();
+  });
+  const observe = () => observer.observe(tab.composer as never, { childList: true, characterData: true, subtree: true });
+  const restartObserver = (event: Event) => {
+    const records = observer.takeRecords();
+    if (records.length) {
+      pending = true;
+      if (event.type === "blur") result.deferredBlurs.push(tab.composer.textContent ?? "");
+      const timer = setTimeout(() => { timers.delete(timer); result.flush(); }, 20);
+      timers.add(timer);
+    }
+    observer.disconnect(); observe();
+  };
+  tab.composer.addEventListener("focus", restartObserver, options as unknown as AddEventListenerOptions);
+  tab.composer.addEventListener("blur", restartObserver, options as unknown as AddEventListenerOptions);
+  observe();
+  tab.action.addEventListener("click", () => {
+    if (tab.action.getAttribute("aria-label")?.startsWith("Stop")) { result.finish(); return; }
+    result.sent.push(model);
+    postUserBubble(tab, model);
+    pendingAnswer = tab.doc.createElement("article");
+    pendingAnswer.innerHTML = '<div data-markdown-text-style="assistant-message">Response running</div>';
+    tab.doc.querySelector("main")!.append(pendingAnswer);
+    // The provider's send transaction immediately consumes its state. The DOM
+    // update follows from that state, unlike extension-authored input edits.
+    model = ""; pending = false; draft(tab, ""); busy(tab, true);
+  }, options as unknown as AddEventListenerOptions);
+  tab.composer.addEventListener("keydown", event => {
+    if ((event as KeyboardEvent).key === "Enter" && !event.defaultPrevented) tab.action.click();
+  }, options as unknown as AddEventListenerOptions);
+  return result;
+}
+
+/** The user bubble can commit before React clears or remounts the input. */
+function simulateDelayedComposerConsumption(tab: Tab): { sent: string[]; clear: () => void; finish: () => void } {
+  const sent: string[] = [];
+  let pendingAnswer: HTMLElement | null = null;
+  tab.action.addEventListener("click", () => {
+    if (tab.action.getAttribute("aria-label")?.startsWith("Stop")) return;
+    const text = tab.composer.textContent ?? "";
+    sent.push(text); postUserBubble(tab, text);
+    pendingAnswer = tab.doc.createElement("article");
+    pendingAnswer.innerHTML = '<div data-markdown-text-style="assistant-message">Response running</div>';
+    tab.doc.querySelector("main")!.append(pendingAnswer);
+    busy(tab, true);
+  });
+  return {
+    sent,
+    clear: () => draft(tab, ""),
+    finish: () => {
+      if (pendingAnswer) {
+        pendingAnswer.setAttribute("data-chatgpt-selection-message-id", crypto.randomUUID());
+        pendingAnswer.insertAdjacentHTML("beforeend", '<div class="turn-action-controls"><button aria-label="Copy">Copy</button><button aria-label="Rate response">Rate</button></div>');
+        pendingAnswer = null;
+      }
+      busy(tab, false);
+    },
+  };
+}
+
 async function localQueueBeforeVirtualization(state: DocumentVisibilityState): Promise<{
   tab: Tab; main: HTMLElement; localId: string; firstTurn: Element[];
   native: ReturnType<typeof simulateNativeChat>; first: string; second: string;
@@ -262,6 +374,27 @@ function currentChatGptResponse(doc: Document, state: string, responseId: string
     <button aria-label="Regenerate response">Regenerate response</button><button aria-label="More actions">More</button>
   </div>`;
   return turn;
+}
+
+function historicalTertiaryStatusTranscript(tab: Tab): { status: HTMLElement; statusBody: HTMLElement; latest: HTMLElement; latestAssistant: HTMLElement } {
+  const status = tab.doc.createElement("div");
+  status.setAttribute("data-talvt-turn-state", "complete");
+  status.innerHTML = `<div>
+    <div data-chatgpt-search-unit-key="fallback-turn-7:0:user" data-chatgpt-search-message-ids="22222222-2222-4222-8222-222222222222"><div data-user-message-bubble>Draw an illustration from this description.</div></div>
+    <div><span hidden data-chatgpt-agent-turn-start></span><div><div><div><div><div data-markdown-text-style="assistant-message" data-markdown-text-tone="tertiary">Clarified visual intent</div></div></div></div></div></div>
+  </div>`;
+  const imageTurn = tab.doc.createElement("div");
+  imageTurn.setAttribute("data-talvt-turn-state", "complete");
+  imageTurn.innerHTML = '<div data-chatgpt-selection-message-id="33333333-3333-4333-8333-333333333333"><div data-markdown-text-style="assistant-message"><img alt="Completed generated image"></div></div>';
+  const latest = currentChatGptResponse(tab.doc, "complete");
+  const latestUser = tab.doc.createElement("article");
+  latestUser.setAttribute("data-chatgpt-search-unit-key", "44444444-4444-4444-8444-444444444444:user");
+  latestUser.setAttribute("data-chatgpt-search-message-ids", "44444444-4444-4444-8444-444444444444");
+  latestUser.innerHTML = "<div data-user-message-bubble>Thanks. Please explain the result.</div>";
+  latest.prepend(latestUser);
+  tab.doc.querySelector("main")!.append(status, imageTurn, latest);
+  return { status, statusBody: status.querySelector('[data-markdown-text-style="assistant-message"]')!, latest,
+    latestAssistant: latest.querySelector('[data-chatgpt-selection-message-id]')! };
 }
 
 function simulateCurrentNativeChat(tab: Tab): { sent: string[]; finish: () => void } {
@@ -355,6 +488,146 @@ function renderCollapsedPlainUser(bubble: HTMLElement, text: string): void {
 }
 
 describe("Persistent message queue UI", () => {
+  test("empty draft recovery does not leave a readonly input after restart before send cleanup", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Queue survives interruption before dispatch");
+    tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let saved = false;
+    tab.after = request => {
+      if (request.action === "draft-save" && request.text === "" && !saved) { saved = true; return gate; }
+    };
+    tab.before = request => { if (request.action === "draft-remove") throw new Error("Old document disconnected before cleanup"); };
+    busy(tab, false); now += 4000;
+    try {
+      await waitFor(() => saved, "focused empty input checkpoint committed");
+      tab.queue.stop();
+      const reopened = await createTab();
+      expect(Boolean(reopened.shadow.querySelector('[aria-label="Saved unsent draft"]'))).toBe(false);
+      expect((await persisted()).drafts ?? []).toEqual([]);
+      expect(reopened.composer.textContent).toBe("");
+    } finally {
+      release();
+      await waitFor(() => !tab.queue.dispatching, "interrupted dispatch settles");
+    }
+  });
+
+  test("empty draft recovery does not leak a blank card when final cleanup fails after a confirmed send", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Send once despite empty draft cleanup failure");
+    tab.composer.focus();
+    tab.before = request => { if (request.action === "draft-remove") throw new Error("Document lost its cleanup connection"); };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "focused empty input send settles");
+    expect(native.sent).toEqual(["Send once despite empty draft cleanup failure"]);
+    expect(Boolean(tab.shadow.querySelector('[aria-label="Saved unsent draft"]'))).toBe(false);
+    expect((await persisted()).drafts ?? []).toEqual([]);
+    expect(draftBuffer(tab)).toBeNull();
+  });
+
+  test("empty draft recovery keeps new typing after an empty checkpoint acknowledgement", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Only this queued prompt sends");
+    tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let saved = false;
+    tab.after = request => {
+      if (request.action === "draft-save" && request.text === "" && !saved) { saved = true; return gate; }
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => saved && Boolean(draftBuffer(tab)), "empty checkpoint awaiting acknowledgement");
+    typeInBuffer(tab, "New unfinished typing after the empty checkpoint");
+    release();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "new typing restored after queued send");
+    expect(native.sent).toEqual(["Only this queued prompt sends"]);
+    expect(tab.composer.textContent).toBe("New unfinished typing after the empty checkpoint");
+    expect((await persisted()).drafts ?? []).toEqual([]);
+  });
+
+  test.each(["Nonempty recovery text", " \n\t "])("empty draft recovery preserves real saved draft %j", async text => {
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "old-document", action: "draft-save", id: "recoverable", text, draftRevision: 1 }, "old-document", now);
+    const tab = await createTab({ idle: true });
+    expect(tab.shadow.querySelector<HTMLTextAreaElement>('[aria-label="Saved unsent draft"]')?.value).toBe(text);
+    button(tab, "restore-draft").click();
+    await waitFor(() => !tab.queue.saving && !tab.shadow.querySelector('[aria-label="Saved unsent draft"]'), "manual recovery retained");
+    expect(tab.composer.textContent).toBe(text);
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("manual draft restore rejects a stale recovery card after navigation to another saved chat", async () => {
+    const text = "This unfinished draft belongs only to the original conversation";
+    await store.apply({ type: QUEUE_MESSAGE_TYPE, key, clientId: "old-document", action: "draft-save", id: "route-protected", text, draftRevision: 1 }, "old-document", now);
+    const tab = await createTab({ idle: true });
+    // A recovery-only queue does not schedule a mutation tick. Freeze its
+    // fallback timer to inspect the real interval before the next 900ms poll.
+    tab.dom.clearInterval(tab.queue.pollTimer as unknown as ReturnType<typeof tab.dom.setInterval>);
+    const restore = button(tab, "restore-draft");
+    const destination = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    tab.dom.history.pushState({}, "", `/c/${destination}`);
+    tab.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", destination);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(tab.queue.state?.key).toBe(key);
+    expect(restore.isConnected).toBe(true);
+    restore.click();
+    await waitFor(() => !tab.queue.saving, "stale restore click settles");
+    expect(tab.composer.textContent).toBe("");
+    expect(tab.requests.filter(request => request.action === "draft-remove")).toHaveLength(0);
+    expect((await persisted()).drafts?.map(entry => entry.text)).toEqual([text]);
+    expect(Boolean(tab.shadow.querySelector('[aria-label="Saved unsent draft"]'))).toBe(false);
+  });
+
+  test("historical completed tertiary status does not intercept an idle native Enter", async () => {
+    const tab = await createTab({ idle: true });
+    historicalTertiaryStatusTranscript(tab);
+    const native = simulateNativeChat(tab);
+    tab.composer.addEventListener("keydown", event => {
+      if ((event as KeyboardEvent).key === "Enter" && !event.defaultPrevented) tab.action.click();
+    });
+    draft(tab, "Native message after the image and later text response completed");
+    expect(enter(tab)).toBe(true);
+    expect(native.sent).toEqual(["Native message after the image and later text response completed"]);
+    expect(tab.requests.filter(request => request.action === "enqueue")).toHaveLength(0);
+    expect((await persisted()).items).toHaveLength(0);
+  });
+
+  test("historical completed tertiary status cannot strand an automatic queued message", async () => {
+    const tab = await createTab();
+    historicalTertiaryStatusTranscript(tab);
+    const id = await enqueue(tab, "Queue after the latest completed answer");
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual(["Queue after the latest completed answer"]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    expect(tab.shadow.querySelector(`li[data-id='${id}']`)).toBeNull();
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test.each(["latest idless", "latest incomplete", "status incomplete", "status without completion", "nontertiary status", "unverified route", "latest answer missing"] as const)("historical status handling still blocks a %s transcript", async condition => {
+    const tab = await createTab();
+    const transcript = historicalTertiaryStatusTranscript(tab);
+    if (condition === "latest idless") transcript.latestAssistant.removeAttribute("data-chatgpt-selection-message-id");
+    if (condition === "latest incomplete") transcript.latest.setAttribute("data-talvt-turn-state", "streaming");
+    if (condition === "status incomplete") transcript.status.setAttribute("data-talvt-turn-state", "thinking");
+    if (condition === "status without completion") transcript.status.removeAttribute("data-talvt-turn-state");
+    if (condition === "nontertiary status") transcript.statusBody.removeAttribute("data-markdown-text-tone");
+    if (condition === "unverified route") {
+      for (const marker of Array.from(tab.doc.querySelectorAll("[data-chatgpt-selection-conversation-id]"))) marker.removeAttribute("data-chatgpt-selection-conversation-id");
+    }
+    if (condition === "latest answer missing") transcript.latestAssistant.remove();
+    const id = await enqueue(tab, "Remain saved while transcript safety is unresolved");
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("queued");
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+  });
+
   test("a canceled queued click permits the model extension's delayed replay exactly once", async () => {
     const tab = await createTab();
     wrapComposerInForm(tab);
@@ -1771,11 +2044,10 @@ describe("Persistent message queue UI", () => {
     expect(tab.requests.filter(request => request.action === "attempt").map(request => request.id)).toEqual([id]);
   });
 
-  test.each(["draft", "attachment", "pause", "busy"] as const)("a hidden tab still respects its %s guard and sends after it clears", async guard => {
+  test.each(["attachment", "pause", "busy"] as const)("a hidden tab still respects its %s guard and sends after it clears", async guard => {
     const tab = await createTab({ visibility: "hidden" });
     const id = await enqueue(tab, "Send only after the protected state clears");
     const native = simulateNativeChat(tab);
-    if (guard === "draft") draft(tab, "Unsent text must survive");
     if (guard === "attachment") tab.composer.closest("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<div data-file-id="protected-file">File</div>');
     if (guard === "pause") {
       button(tab, "pause").click();
@@ -1789,12 +2061,7 @@ describe("Persistent message queue UI", () => {
     const host = tab.doc.getElementById("plannotator-message-queue")!;
     expect(host.dataset.queueState).toBe(guard === "pause" ? "paused" : guard === "busy" ? "chat-busy" : guard === "attachment" ? "attachments" : "draft");
     expect(host.dataset.queueVisibility).toBe("hidden");
-    if (guard === "draft") {
-      expect(tab.composer.innerText).toBe("Unsent text must survive");
-      expect(tab.shadow.querySelector("li .status")?.textContent).toBe("Queue or clear your draft to continue.");
-      expect(Object.values(host.dataset).join(" ")).not.toContain("Unsent text must survive");
-      draft(tab, "");
-    } else if (guard === "attachment") {
+    if (guard === "attachment") {
       expect(tab.shadow.querySelector("li .status")?.textContent).toBe("Send or remove your attachment to continue.");
       tab.doc.querySelector("[data-file-id]")!.remove();
     } else if (guard === "pause") button(tab, "pause").click();
@@ -1809,17 +2076,854 @@ describe("Persistent message queue UI", () => {
     expect(tab.shadow.textContent).not.toContain("Stored in this Chrome profile");
   });
 
-  test("automatic dispatch waits when the composer contains an unsent draft", async () => {
+  test("draft restores after native ChatGPT clears to its structural ProseMirror placeholder", async () => {
     const tab = await createTab();
-    await enqueue(tab, "Saved queued text");
-    draft(tab, "Do not replace this draft");
+    const id = await enqueue(tab, "Queued through native empty paragraph");
+    draft(tab, "Preserve my unfinished text");
+    const native = simulateNativeChat(tab);
+    tab.action.addEventListener("click", () => {
+      tab.composer.innerHTML = '<p data-empty-paragraph="true"><br class="ProseMirror-trailingBreak"></p>';
+    });
     busy(tab, false); now += 4000;
-    let sends = 0;
-    tab.action.addEventListener("click", () => { sends++; });
     await poll(tab);
-    expect(sends).toBe(0);
+    expect(native.sent).toEqual(["Queued through native empty paragraph"]);
+    expect(tab.composer.textContent).toBe("Preserve my unfinished text");
+    expect((await persisted()).drafts ?? []).toEqual([]);
+    expect(tab.shadow.querySelector(`li[data-id='${id}']`)).toBeNull();
+  });
+
+  test.each(["visible", "hidden"] as const)("automatic dispatch preserves a draft in a %s tab", async state => {
+    const tab = await createTab({ visibility: state });
+    const id = await enqueue(tab, "Saved queued text");
+    draft(tab, "Do not replace this draft");
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual(["Saved queued text"]);
     expect(tab.composer.innerText).toBe("Do not replace this draft");
-    expect((await persisted()).items[0]?.status).toBe("queued");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    expect(tab.shadow.querySelector(`li[data-id='${id}']`)).toBeNull();
+  });
+
+  test("draft preservation captures typing and selection after a delayed claim response", async () => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Only the saved queue message should send");
+    draft(tab, "Earlier draft"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let claimed = false;
+    tab.after = request => { if (request.action === "claim") { claimed = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => claimed, "draft-preserving claim await");
+    draft(tab, "Latest typing during the claim");
+    tab.dom.getSelection()!.setBaseAndExtent(tab.composer.firstChild as never, 7, tab.composer.firstChild as never, 15);
+    expect(draftBuffer(tab)).toBeNull();
+    release();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "queued send after claim and draft restoration");
+    expect(native.sent).toEqual(["Only the saved queue message should send"]);
+    expect(tab.composer.textContent).toBe("Latest typing during the claim");
+    expect(tab.doc.activeElement).toBe(tab.composer);
+    expect([tab.dom.getSelection()!.anchorOffset, tab.dom.getSelection()!.focusOffset]).toEqual([7, 15]);
+    expect((await persisted()).drafts).toEqual([]);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+  });
+
+  test("ProseMirror draft preservation commits the queued native model before returning focus to the draft", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "QUEUED_PAYLOAD_B");
+    draft(tab, "UNSENT_USER_DRAFT"); tab.composer.focus();
+    const native = simulateObserverBackedNativeChat(tab);
+    try {
+      busy(tab, false); now += 4000;
+      await waitFor(() => native.sent.length > 0, "model-backed native send");
+      expect(native.sent).toEqual(["QUEUED_PAYLOAD_B"]);
+      expect(native.deferredBlurs).not.toContain("QUEUED_PAYLOAD_B");
+      await waitFor(() => !tab.queue.dispatching, "model-backed acknowledgement and restore");
+      expect(tab.composer.textContent).toBe("UNSENT_USER_DRAFT");
+      expect(native.model()).toBe("UNSENT_USER_DRAFT");
+    } finally { native.close(); }
+  });
+
+  test("ProseMirror draft restoration commits its model before a subsequent native Enter", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "QUEUED_PAYLOAD_A");
+    draft(tab, "RESTORED_USER_DRAFT");
+    const other = tab.doc.createElement("input"); tab.doc.body.append(other); other.focus();
+    const native = simulateObserverBackedNativeChat(tab);
+    // Isolate restoration: unrelated native work is allowed to flush the first
+    // queued replacement before Send, even with the old premature-focus code.
+    tab.before = request => { if (request.action === "attempt") native.flush(); };
+    try {
+      busy(tab, false); now += 4000;
+      await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "first model-backed send and background draft restoration");
+      expect(native.sent).toEqual(["QUEUED_PAYLOAD_A"]);
+      expect(tab.doc.activeElement).toBe(other);
+      expect(native.model()).toBe("RESTORED_USER_DRAFT");
+      native.finish();
+      await waitFor(() => tab.queue.state?.items.length === 0, "first queued response retired");
+      tab.composer.focus();
+      const explicitEnter = new tab.dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true, cancelable: true });
+      Object.defineProperty(explicitEnter, "isTrusted", { value: true });
+      tab.composer.dispatchEvent(explicitEnter as unknown as Event);
+      await waitFor(() => native.sent.length === 2, "subsequent explicit Enter");
+      expect(native.sent).toEqual(["QUEUED_PAYLOAD_A", "RESTORED_USER_DRAFT"]);
+    } finally { native.close(); }
+  });
+
+  test("ProseMirror native commit redirects new typing without submitting it as queued text", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "QUEUED_PAYLOAD_WITH_COMMIT_TYPING");
+    draft(tab, "Draft"); tab.composer.focus();
+    const native = simulateObserverBackedNativeChat(tab);
+    let redirected = false;
+    tab.composer.addEventListener("input", () => {
+      if (tab.composer.textContent !== "QUEUED_PAYLOAD_WITH_COMMIT_TYPING" || redirected) return;
+      // Arrive at the first microtask after the browser's owned edit, while
+      // its task barrier has not yet returned keyboard focus to the buffer.
+      queueMicrotask(() => {
+        if (!draftBuffer(tab)) return;
+        draftBuffer(tab)!.setSelectionRange(5, 5);
+        const input = new tab.dom.InputEvent("beforeinput", { inputType: "insertText", data: " typed during commit", bubbles: true, cancelable: true });
+        Object.defineProperty(input, "isTrusted", { value: true });
+        redirected = !tab.composer.dispatchEvent(input as unknown as Event);
+      });
+    });
+    try {
+      busy(tab, false); now += 4000;
+      await waitFor(() => native.sent.length > 0, "native model send after concurrent typing");
+      expect(redirected).toBe(true);
+      expect(native.sent).toEqual(["QUEUED_PAYLOAD_WITH_COMMIT_TYPING"]);
+      await waitFor(() => !tab.queue.dispatching, "concurrent typed draft restored");
+      expect(tab.composer.textContent).toBe("Draft typed during commit");
+      expect(native.model()).toBe("Draft typed during commit");
+    } finally { native.close(); }
+  });
+
+  test.each(["typing", "Enter", "route"] as const)("ProseMirror restoration rechecks %s that arrives during its commit barrier", async change => {
+    const tab = await createTab();
+    await enqueue(tab, "QUEUED_BEFORE_RESTORE_RACE");
+    draft(tab, "Draft before restoration"); tab.composer.focus();
+    const native = simulateObserverBackedNativeChat(tab);
+    let changed = false;
+    tab.composer.addEventListener("input", () => {
+      if (changed || !native.sent.length || tab.composer.textContent !== "Draft before restoration") return;
+      changed = true;
+      queueMicrotask(() => {
+        if (change === "typing") typeInBuffer(tab, "Draft typed during restoration");
+        else if (change === "Enter") enterBuffer(tab);
+        else {
+          tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+          tab.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+          draft(tab, "Independent new-route draft");
+        }
+      });
+    });
+    try {
+      busy(tab, false); now += 4000;
+      await waitFor(() => changed && !tab.queue.dispatching, "restore race settles after native model commit");
+      expect(native.sent).toEqual(["QUEUED_BEFORE_RESTORE_RACE"]);
+      const saved = await persisted();
+      if (change === "typing") {
+        expect(tab.composer.textContent).toBe("Draft typed during restoration");
+        expect(native.model()).toBe("Draft typed during restoration");
+        expect(saved.drafts).toEqual([]);
+      } else if (change === "Enter") {
+        expect(tab.composer.textContent).toBe("");
+        expect(native.model()).toBe("");
+        expect(saved.items.filter(item => item.text === "Draft before restoration")).toHaveLength(1);
+        expect(saved.drafts).toEqual([]);
+      } else {
+        expect(tab.composer.textContent).toBe("Independent new-route draft");
+        expect(saved.drafts?.map(entry => entry.text)).toEqual(["Draft before restoration"]);
+      }
+    } finally { native.close(); }
+  });
+
+  test("ProseMirror restoration leaves an IME composition attached across its commit barrier", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "QUEUED_BEFORE_RESTORE_IME");
+    draft(tab, "Draft before IME restoration"); tab.composer.focus();
+    const native = simulateObserverBackedNativeChat(tab);
+    let composing = false;
+    tab.composer.addEventListener("input", () => {
+      if (composing || !native.sent.length || tab.composer.textContent !== "Draft before IME restoration") return;
+      queueMicrotask(() => {
+        const buffer = draftBuffer(tab)!;
+        buffer.dispatchEvent(new tab.dom.CompositionEvent("compositionstart", { bubbles: true, composed: true }) as unknown as Event);
+        typeInBuffer(tab, "編集中"); composing = true;
+      });
+    });
+    try {
+      busy(tab, false); now += 4000;
+      await waitFor(() => composing, "IME begins during restore model commit");
+      expect(tab.queue.dispatching).toBe(true);
+      expect(draftBuffer(tab)?.isConnected).toBe(true);
+      const buffer = typeInBuffer(tab, "編集完了");
+      buffer.dispatchEvent(new tab.dom.CompositionEvent("compositionend", { bubbles: true, composed: true }) as unknown as Event);
+      await waitFor(() => !tab.queue.dispatching, "IME finishes before native restoration is released");
+      expect(native.sent).toEqual(["QUEUED_BEFORE_RESTORE_IME"]);
+      expect(tab.composer.textContent).toBe("編集完了");
+      expect(native.model()).toBe("編集完了");
+      expect((await persisted()).drafts).toEqual([]);
+    } finally { native.close(); }
+  });
+
+  test.each(["unchanged", "typing", "Enter"] as const)("acknowledged queue send preserves %s while native consumption clears the input later", async change => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "ACK_BEFORE_NATIVE_CLEAR");
+    draft(tab, "Keep this unsent draft in its input"); tab.composer.focus();
+    const native = simulateDelayedComposerConsumption(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => tab.requests.some(request => request.action === "ack"), "queue delivery acknowledged before native clear");
+    expect(native.sent).toEqual(["ACK_BEFORE_NATIVE_CLEAR"]);
+    expect(tab.composer.textContent).toBe("ACK_BEFORE_NATIVE_CLEAR");
+    // A realistic later native commit: delivery evidence has arrived while the
+    // original editor still contains the sent payload.
+    await new Promise(resolve => setTimeout(resolve, 40));
+    if (change !== "unchanged") typeInBuffer(tab, "Latest typing while native clear is pending");
+    if (change === "Enter") {
+      enterBuffer(tab);
+      await waitFor(() => draftBuffer(tab)?.value === "", "buffer Enter durably enqueued during native clear wait");
+    }
+    native.clear();
+    const expectedDraft = change === "unchanged" ? "Keep this unsent draft in its input" : change === "typing" ? "Latest typing while native clear is pending" : "";
+    await waitFor(() => !tab.queue.dispatching && tab.composer.textContent === expectedDraft, "draft restored after delayed native consumption", 700);
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("waiting");
+    expect((await persisted()).drafts).toEqual([]);
+    expect(tab.shadow.querySelector('[aria-label="Saved unsent draft"]')).toBeNull();
+    expect((await persisted()).items.filter(item => item.text === "Latest typing while native clear is pending")).toHaveLength(change === "Enter" ? 1 : 0);
+    expect(native.sent).toEqual(["ACK_BEFORE_NATIVE_CLEAR"]);
+  });
+
+  test("acknowledged queue send times out safely when the native payload never clears", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "ACK_WITHOUT_NATIVE_CLEAR");
+    draft(tab, "Recover this unfinished draft"); tab.composer.focus();
+    const native = simulateDelayedComposerConsumption(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => tab.requests.some(request => request.action === "ack") && !tab.queue.dispatching, "bounded native-clear wait finishes");
+    expect(native.sent).toEqual(["ACK_WITHOUT_NATIVE_CLEAR"]);
+    expect(tab.composer.textContent).toBe("ACK_WITHOUT_NATIVE_CLEAR");
+    expect((await persisted()).drafts?.map(entry => entry.text)).toEqual(["Recover this unfinished draft"]);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueDraftRestore).toBe("native-text-retained");
+  });
+
+  test("acknowledged queue send restores its draft after a temporary readiness drop clears", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "ACK_BEFORE_READY_AGAIN");
+    draft(tab, "Draft retained through native loading transition"); tab.composer.focus();
+    const native = simulateNativeChat(tab);
+    const main = tab.doc.querySelector("main")!;
+    tab.action.addEventListener("click", () => { main.setAttribute("aria-busy", "true"); });
+    busy(tab, false); now += 4000;
+    await waitFor(() => tab.requests.some(request => request.action === "ack"), "queue acknowledgement while same route is temporarily loading");
+    await new Promise(resolve => setTimeout(resolve, 40));
+    main.removeAttribute("aria-busy");
+    await waitFor(() => !tab.queue.dispatching && tab.composer.textContent === "Draft retained through native loading transition", "draft restored after native loading transition", 700);
+    expect(native.sent).toEqual(["ACK_BEFORE_READY_AGAIN"]);
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test.each(["data-is-streaming", "aria-busy"] as const)("acknowledged queue send restores its draft while its confirmed response has %s", async marker => {
+    const tab = await createTab();
+    await enqueue(tab, "ACK_STARTED_NATIVE_STREAM");
+    draft(tab, "Keep typing while the sent message generates"); tab.composer.focus();
+    const native = simulateNativeChat(tab);
+    tab.action.addEventListener("click", () => {
+      const assistant = tab.doc.querySelector("main")!.lastElementChild!;
+      const marked = marker === "aria-busy" ? assistant.querySelector('[data-markdown-text-style="assistant-message"]')! : assistant;
+      marked.setAttribute(marker, "true");
+    });
+    busy(tab, false); now += 4000;
+    await waitFor(() => tab.requests.some(request => request.action === "ack"), "queue acknowledgement after native streaming marker appears");
+    await waitFor(() => !tab.queue.dispatching && tab.composer.textContent === "Keep typing while the sent message generates", "draft restored during confirmed native generation", 700);
+    expect(native.sent).toEqual(["ACK_STARTED_NATIVE_STREAM"]);
+    expect(tab.doc.querySelector(`[${marker}="true"]`)).not.toBeNull();
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("acknowledged queue send keeps a recovery copy without writing into an unproven remounted editor", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "ACK_WITH_COMPOSER_REMOUNT");
+    draft(tab, "Draft retained through native composer remount"); tab.composer.focus();
+    const native = simulateNativeChat(tab);
+    const original = tab.composer;
+    tab.action.addEventListener("click", () => {
+      const replacement = tab.composer.cloneNode(false) as HTMLElement;
+      tab.composer.replaceWith(replacement); tab.composer = replacement;
+    });
+    busy(tab, false); now += 4000;
+    await waitFor(() => tab.requests.some(request => request.action === "ack"), "queue acknowledgement after empty native editor remount");
+    expect(original.isConnected).toBe(false);
+    await waitFor(() => !tab.queue.dispatching, "remount retains recovery without rebinding composer");
+    expect(native.sent).toEqual(["ACK_WITH_COMPOSER_REMOUNT"]);
+    expect(tab.composer.textContent).toBe("");
+    expect((await persisted()).drafts?.map(entry => entry.text)).toEqual(["Draft retained through native composer remount"]);
+    expect(tab.shadow.querySelector<HTMLTextAreaElement>('[aria-label="Saved unsent draft"]')?.value).toBe("Draft retained through native composer remount");
+  });
+
+  test.each(["identity mismatch", "route change", "loading spinner", "missing acknowledged turn", "new attachment", "new native draft"] as const)("acknowledged queue send preserves recovery through %s instead of restoring blindly", async changed => {
+    const tab = await createTab();
+    await enqueue(tab, "ACK_RESTORE_MUST_STAY_GUARDED");
+    draft(tab, "Protected draft stays recoverable"); tab.composer.focus();
+    const native = simulateNativeChat(tab);
+    tab.after = request => {
+      if (request.action !== "ack") return;
+      const main = tab.doc.querySelector("main")!;
+      if (changed === "identity mismatch") main.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      if (changed === "route change") {
+        tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        main.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      }
+      if (changed === "loading spinner") main.insertAdjacentHTML("afterbegin", '<div data-testid="conversation-loading-spinner">Loading another transcript</div>');
+      if (changed === "missing acknowledged turn") {
+        for (const entry of Array.from(main.querySelectorAll("[data-chatgpt-search-message-ids]"))) {
+          if (entry.getAttribute("data-chatgpt-search-message-ids") === request.userMessageId) entry.remove();
+        }
+      }
+      if (changed === "new attachment") tab.composer.closest("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<div data-file-id="after-ack-file">Preserve file</div>');
+      if (changed === "new native draft") draft(tab, "New native text after confirmed send");
+    };
+    busy(tab, false); now += 4000;
+    await waitFor(() => tab.requests.some(request => request.action === "ack") && !tab.queue.dispatching, "guarded post-ACK restoration settles");
+    expect(native.sent).toEqual(["ACK_RESTORE_MUST_STAY_GUARDED"]);
+    expect(tab.composer.textContent).toBe(changed === "new native draft" ? "New native text after confirmed send" : "");
+    expect((await persisted()).drafts?.map(entry => entry.text)).toEqual(["Protected draft stays recoverable"]);
+    if (changed === "new attachment") expect(tab.doc.querySelector('[data-file-id="after-ack-file"]')?.textContent).toBe("Preserve file");
+  });
+
+  test.each(["existing draft", "empty focused input"] as const)("draft preservation retains typing during attempt IPC with %s", async initial => {
+    const tab = await createTab();
+    await enqueue(tab, "Native queued payload");
+    draft(tab, initial === "existing draft" ? "Original unsent draft" : ""); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempted = false;
+    tab.after = request => { if (request.action === "attempt") { attempted = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "draft buffer while attempt response is pending");
+    const text = "  continued typing\n\nwith whitespace  ";
+    const buffer = typeInBuffer(tab, text);
+    buffer.setSelectionRange(3, 15, "backward");
+    expect(tab.composer.textContent).toBe("Native queued payload");
+    expect(native.sent).toEqual([]);
+    await waitFor(() => tab.requests.some(request => request.action === "draft-save" && request.text === text), "new typing journal request");
+    release();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "queued payload acknowledged with latest draft restored");
+    expect(native.sent).toEqual(["Native queued payload"]);
+    expect(tab.composer.textContent).toBe(text);
+    expect([tab.dom.getSelection()!.anchorOffset, tab.dom.getSelection()!.focusOffset]).toEqual([15, 3]);
+    expect(tab.doc.activeElement).toBe(tab.composer);
+    expect(draftBuffer(tab)).toBeNull();
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("draft preservation retains edits made while the first backup commit is pending", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Queue waits for a durable backup");
+    draft(tab, "Before the backup"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let pending = false;
+    tab.before = request => { if (request.action === "draft-save" && !pending) { pending = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => pending && Boolean(draftBuffer(tab)), "initial backup pending");
+    typeInBuffer(tab, "Typed while storage was saving");
+    expect(tab.composer.textContent).toBe("Before the backup");
+    expect(native.sent).toEqual([]);
+    release();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "send following backup");
+    expect(tab.composer.textContent).toBe("Typed while storage was saving");
+    expect(native.sent).toEqual(["Queue waits for a durable backup"]);
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("draft preservation Enter durably queues its snapshot without clearing later typing", async () => {
+    const tab = await createTab();
+    const first = await enqueue(tab, "Already queued before typing");
+    draft(tab, "Draft to enqueue"); tab.composer.focus();
+    let releaseAttempt!: () => void, releaseEnqueue!: () => void;
+    const attemptGate = new Promise<void>(resolve => { releaseAttempt = resolve; });
+    const enqueueGate = new Promise<void>(resolve => { releaseEnqueue = resolve; });
+    let attempted = false, savingDraft = false;
+    tab.after = request => {
+      if (request.action === "attempt") { attempted = true; return attemptGate; }
+      if (request.action === "enqueue") { savingDraft = true; return enqueueGate; }
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "borrowed composer before buffer Enter");
+    expect(enterBuffer(tab)).toBe(false);
+    await waitFor(() => savingDraft, "buffer enqueue committed before delayed response");
+    typeInBuffer(tab, "Newer draft typed while enqueue was saving");
+    expect(enterBuffer(tab)).toBe(false); // An in-flight submit cannot duplicate its first snapshot.
+    releaseEnqueue();
+    await waitFor(() => tab.queue.state?.items.length === 2, "buffer enqueue response applied");
+    expect(draftBuffer(tab)?.value).toBe("Newer draft typed while enqueue was saving");
+    releaseAttempt();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "first queued send with concurrent draft submit");
+    expect(native.sent).toEqual(["Already queued before typing"]);
+    expect(tab.composer.textContent).toBe("Newer draft typed while enqueue was saving");
+    const state = await persisted();
+    expect(state.items.map(item => [item.text, item.status])).toEqual([
+      ["Already queued before typing", "waiting"], ["Draft to enqueue", "queued"],
+    ]);
+    expect(state.items[0]?.id).toBe(first);
+    expect(tab.requests.filter(request => request.action === "enqueue" && request.text === "Draft to enqueue")).toHaveLength(1);
+    expect(state.drafts).toEqual([]);
+  });
+
+  test("draft preservation and delayed Pro replay send only the queued payload exactly once", async () => {
+    const tab = await createTab();
+    wrapComposerInForm(tab);
+    await enqueue(tab, "Pro should receive this queued payload");
+    draft(tab, "Keep editing my next thought"); tab.composer.focus();
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => gate.canceled.length === 1 && Boolean(draftBuffer(tab)), "Pro canceled the original queued click");
+    typeInBuffer(tab, "My next thought continued while Pro waits");
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.textContent).toBe("Pro should receive this queued payload");
+    gate.replay(); gate.replay();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "Pro replay and draft restoration");
+    gate.replay();
+    expect(native.sent).toEqual(["Pro should receive this queued payload"]);
+    expect(tab.composer.textContent).toBe("My next thought continued while Pro waits");
+    expect((await persisted()).drafts).toEqual([]);
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(1);
+  });
+
+  test("draft preservation retries a lost buffer enqueue response with the same ID", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "First queued send");
+    draft(tab, "Queue this buffer draft once"); tab.composer.focus();
+    let releaseAttempt!: () => void;
+    const gate = new Promise<void>(resolve => { releaseAttempt = resolve; });
+    let attempted = false, enqueueReplies = 0;
+    tab.after = request => {
+      if (request.action === "attempt") { attempted = true; return gate; }
+      if (request.action === "enqueue" && ++enqueueReplies === 1) throw new Error("Lost buffer enqueue response after commit");
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    try {
+      await waitFor(() => attempted && Boolean(draftBuffer(tab)), "buffer while first send awaits IPC");
+      enterBuffer(tab);
+      await waitFor(() => tab.shadow.textContent?.includes("Lost buffer enqueue response") === true, "uncertain buffer enqueue warning");
+      expect(draftBuffer(tab)?.value).toBe("Queue this buffer draft once");
+      enterBuffer(tab);
+      await waitFor(() => enqueueReplies === 2 && draftBuffer(tab)?.value === "", "successful idempotent buffer retry");
+      const saves = tab.requests.filter(request => request.action === "enqueue" && request.text === "Queue this buffer draft once");
+      expect(saves).toHaveLength(2);
+      expect(saves[1]?.id).toBe(saves[0]?.id);
+      expect((await persisted()).items.filter(item => item.text === "Queue this buffer draft once")).toHaveLength(1);
+    } finally { releaseAttempt(); }
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "first send finishes after buffer retry");
+  });
+
+  test("draft preservation does not restore an already queued buffer while its enqueue reply is delayed", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "First queued send");
+    draft(tab, "Submit the buffer before native restoration"); tab.composer.focus();
+    let releaseAttempt!: () => void, releaseEnqueue!: () => void;
+    const attemptGate = new Promise<void>(resolve => { releaseAttempt = resolve; });
+    const enqueueGate = new Promise<void>(resolve => { releaseEnqueue = resolve; });
+    let attempted = false, savingDraft = false;
+    tab.after = request => {
+      if (request.action === "attempt") { attempted = true; return attemptGate; }
+      if (request.action === "enqueue") { savingDraft = true; return enqueueGate; }
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "pending attempt before buffer submission");
+    enterBuffer(tab);
+    await waitFor(() => savingDraft, "buffer enqueue committed before its response");
+    releaseAttempt();
+    await waitFor(() => native.sent.length === 1 && tab.requests.some(request => request.action === "ack"), "native send consumes queue payload before buffer response");
+    // Finish native acknowledgement and any attempted restoration before the
+    // other IPC response. The draft submit still owns its editor snapshot.
+    await new Promise(resolve => setTimeout(resolve, 30));
+    releaseEnqueue();
+    await waitFor(() => !tab.queue.dispatching && draftBuffer(tab) === null, "both operations settled");
+    expect(native.sent).toEqual(["First queued send"]);
+    expect(tab.composer.textContent).toBe("");
+    expect((await persisted()).items.filter(item => item.text === "Submit the buffer before native restoration")).toHaveLength(1);
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("draft preservation redirects trusted native typing while a delayed replay is armed", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Authorized queued payload");
+    draft(tab, "Draft"); tab.composer.focus();
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => gate.canceled.length === 1 && Boolean(draftBuffer(tab)), "Pro replay armed");
+    draftBuffer(tab)!.setSelectionRange(5, 5);
+    const input = new tab.dom.InputEvent("beforeinput", { inputType: "insertText", data: "!", bubbles: true, cancelable: true });
+    Object.defineProperty(input, "isTrusted", { value: true });
+    expect(tab.composer.dispatchEvent(input as unknown as Event)).toBe(false);
+    expect(draftBuffer(tab)?.value).toBe("Draft!");
+    expect(tab.composer.textContent).toBe("Authorized queued payload");
+    gate.replay();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "authorized replay after redirected native typing");
+    expect(native.sent).toEqual(["Authorized queued payload"]);
+    expect(tab.composer.textContent).toBe("Draft!");
+  });
+
+  test("draft preservation trusted native click queues the buffer without revoking an armed Pro replay", async () => {
+    const tab = await createTab();
+    wrapComposerInForm(tab);
+    await enqueue(tab, "Original payload authorized for Pro replay");
+    draft(tab, "Buffer draft submitted with native Send"); tab.composer.focus();
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => gate.canceled.length === 1 && Boolean(draftBuffer(tab)), "Pro replay pending before trusted native click");
+    const click = new tab.dom.MouseEvent("click", { bubbles: true, composed: true, cancelable: true });
+    Object.defineProperty(click, "isTrusted", { value: true });
+    expect(tab.action.dispatchEvent(click as unknown as Event)).toBe(false);
+    await waitFor(() => draftBuffer(tab)?.value === "", "trusted Send enqueues buffered draft");
+    expect(gate.canceled).toHaveLength(1);
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.textContent).toBe("Original payload authorized for Pro replay");
+    expect((await persisted()).items.filter(item => item.text === "Buffer draft submitted with native Send")).toHaveLength(1);
+    gate.replay();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "original replay remains authorized after draft submission");
+    expect(native.sent).toEqual(["Original payload authorized for Pro replay"]);
+    expect(tab.composer.textContent).toBe("");
+    expect((await persisted()).items.map(item => [item.text, item.status])).toEqual([
+      ["Original payload authorized for Pro replay", "waiting"], ["Buffer draft submitted with native Send", "queued"],
+    ]);
+  });
+
+  test("draft preservation native Enter works after restoration while journal cleanup is still pending", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Queue payload before journal cleanup");
+    draft(tab, "Submit the restored draft during cleanup"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let removePending = false;
+    tab.before = request => { if (request.action === "draft-remove") { removePending = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    try {
+      await waitFor(() => removePending && draftBuffer(tab) === null, "native restored before journal cleanup response");
+      expect(tab.queue.dispatching).toBe(true);
+      expect(tab.composer.textContent).toBe("Submit the restored draft during cleanup");
+      expect(enter(tab)).toBe(false);
+      await waitFor(() => !tab.queue.saving && tab.composer.textContent === "", "restored native Enter enqueues while cleanup waits");
+      expect((await persisted()).items.filter(item => item.text === "Submit the restored draft during cleanup")).toHaveLength(1);
+    } finally { release(); }
+    await waitFor(() => !tab.queue.dispatching, "journal cleanup finishes");
+    expect(native.sent).toEqual(["Queue payload before journal cleanup"]);
+    expect(tab.composer.textContent).toBe("");
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("draft preservation carries an uncertain buffer enqueue ID into the restored native input", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "First queued send");
+    draft(tab, "Buffer enqueue must remain idempotent after restoration"); tab.composer.focus();
+    let releaseAttempt!: () => void;
+    const gate = new Promise<void>(resolve => { releaseAttempt = resolve; });
+    let attempted = false, replies = 0;
+    tab.after = request => {
+      if (request.action === "attempt") { attempted = true; return gate; }
+      if (request.action === "enqueue" && ++replies === 1) throw new Error("Buffer enqueue response lost");
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "buffer before lost enqueue response");
+    enterBuffer(tab);
+    await waitFor(() => tab.shadow.textContent?.includes("Buffer enqueue response lost") === true, "lost response warning");
+    releaseAttempt();
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "failed buffer submit restored to native");
+    expect(tab.composer.textContent).toBe("Buffer enqueue must remain idempotent after restoration");
+    enter(tab);
+    await waitFor(() => !tab.queue.saving, "native retry of buffer submit");
+    const saves = tab.requests.filter(request => request.action === "enqueue" && request.text === "Buffer enqueue must remain idempotent after restoration");
+    expect(saves).toHaveLength(2);
+    expect(saves[1]?.id).toBe(saves[0]?.id);
+    expect((await persisted()).items.filter(item => item.text === "Buffer enqueue must remain idempotent after restoration")).toHaveLength(1);
+  });
+
+  test("draft preservation waits for a buffer Enter that begins during final backup persistence", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Queue send finishes before late draft Enter");
+    draft(tab, "Late Enter should enqueue and clear this snapshot"); tab.composer.focus();
+    let releaseFinalSave!: () => void, releaseEnqueue!: () => void;
+    const finalSaveGate = new Promise<void>(resolve => { releaseFinalSave = resolve; });
+    const enqueueGate = new Promise<void>(resolve => { releaseEnqueue = resolve; });
+    let acknowledged = false, finalSavePending = false, enqueuePending = false;
+    tab.after = request => {
+      if (request.action === "ack") acknowledged = true;
+      if (request.action === "draft-save" && acknowledged && !finalSavePending) { finalSavePending = true; return finalSaveGate; }
+      if (request.action === "enqueue") { enqueuePending = true; return enqueueGate; }
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => finalSavePending && Boolean(draftBuffer(tab)), "final backup reply pending");
+    enterBuffer(tab);
+    await waitFor(() => enqueuePending, "late buffer Enter is durable with response pending");
+    releaseFinalSave();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    releaseEnqueue();
+    await waitFor(() => !tab.queue.dispatching && draftBuffer(tab) === null, "late Enter and restoration settle");
+    expect(native.sent).toEqual(["Queue send finishes before late draft Enter"]);
+    expect(tab.composer.textContent).toBe("");
+    expect((await persisted()).items.filter(item => item.text === "Late Enter should enqueue and clear this snapshot")).toHaveLength(1);
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("draft preservation drains late typing backups before retiring a restored journal entry", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Queue send before late typing");
+    draft(tab, "Snapshot before final backup"); tab.composer.focus();
+    let releaseFinalSave!: () => void, releaseLatestSave!: () => void;
+    const finalSaveGate = new Promise<void>(resolve => { releaseFinalSave = resolve; });
+    const latestSaveGate = new Promise<void>(resolve => { releaseLatestSave = resolve; });
+    let acknowledged = false, finalSavePending = false, latestSavePending = false;
+    const latest = "Typing after the final backup snapshot";
+    tab.before = request => {
+      if (request.action === "draft-save" && request.text === latest && !latestSavePending) { latestSavePending = true; return latestSaveGate; }
+    };
+    tab.after = request => {
+      if (request.action === "ack") acknowledged = true;
+      if (request.action === "draft-save" && acknowledged && !finalSavePending) { finalSavePending = true; return finalSaveGate; }
+    };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => finalSavePending && Boolean(draftBuffer(tab)), "final backup before late typing");
+    typeInBuffer(tab, latest);
+    releaseFinalSave();
+    await waitFor(() => latestSavePending, "newer journal revision is pending");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    releaseLatestSave();
+    await waitFor(() => !tab.queue.dispatching && draftBuffer(tab) === null, "restoration and final journal commit settle");
+    await poll(tab);
+    expect(native.sent).toEqual(["Queue send before late typing"]);
+    expect(tab.composer.textContent).toBe(latest);
+    expect((await persisted()).drafts).toEqual([]);
+    expect(tab.shadow.querySelector('[aria-label="Saved unsent draft"]')).toBeNull();
+  });
+
+  test("draft preservation backup failure never writes or sends native queued text", async () => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Keep this queue message saved");
+    draft(tab, "Original user draft"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let backupRequested = false;
+    tab.before = async request => {
+      if (request.action !== "draft-save") return;
+      backupRequested = true; await gate; throw new Error("Draft backup disk failure");
+    };
+    const native = simulateNativeChat(tab);
+    const nativeWrites: string[] = [];
+    tab.composer.addEventListener("input", () => { nativeWrites.push(tab.composer.textContent ?? ""); });
+    busy(tab, false); now += 4000;
+    await waitFor(() => backupRequested && Boolean(draftBuffer(tab)), "failing draft backup wait");
+    typeInBuffer(tab, "More typing while backup fails");
+    release();
+    await waitFor(() => !tab.queue.dispatching, "failed backup releases queued claim");
+    expect(native.sent).toEqual([]);
+    expect(nativeWrites).not.toContain("Keep this queue message saved");
+    expect(tab.composer.textContent).toBe("More typing while backup fails");
+    expect((await persisted()).items.find(item => item.id === id)?.status).toBe("queued");
+    expect(tab.requests.filter(request => request.action === "attempt")).toHaveLength(0);
+  });
+
+  test.each(["route", "native edit", "composer replacement", "attachment"] as const)("draft preservation never overwrites %s during a pending attempt", async change => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Queue text must not leak elsewhere");
+    draft(tab, "Protected original draft"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempted = false;
+    tab.after = request => { if (request.action === "attempt") { attempted = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "attempt before outside mutation");
+    typeInBuffer(tab, "Latest saved recovery text");
+    if (change === "route") {
+      tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      tab.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+      draft(tab, "Draft belonging to another conversation");
+    } else if (change === "native edit") draft(tab, "Unexpected native input must survive");
+    else if (change === "composer replacement") {
+      const replacement = tab.composer.cloneNode(false) as HTMLElement;
+      replacement.textContent = "Replacement editor draft";
+      tab.composer.replaceWith(replacement); tab.composer = replacement;
+    } else tab.composer.closest("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<div data-file-id="new-file">Preserve attachment</div>');
+    const protectedNative = tab.composer.textContent;
+    release();
+    await waitFor(() => !tab.queue.dispatching, "interrupted draft-preserving attempt");
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.textContent).toBe(protectedNative);
+    expect(draftBuffer(tab)).toBeNull();
+    const saved = await persisted();
+    expect(saved.items.find(item => item.id === id)?.status).toBe("review");
+    expect(saved.drafts?.map(entry => entry.text)).toEqual(["Latest saved recovery text"]);
+    if (change === "attachment") expect(tab.doc.querySelector('[data-file-id="new-file"]')?.textContent).toBe("Preserve attachment");
+  });
+
+  test("draft preservation leaves an unconfirmed queued payload and a separate recoverable user draft", async () => {
+    const tab = await createTab();
+    const id = await enqueue(tab, "Unconfirmed native queued payload");
+    draft(tab, "Unsent original user draft"); tab.composer.focus();
+    const gate = delayedSendInterceptor(tab);
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => gate.canceled.length === 1 && Boolean(draftBuffer(tab)), "unconfirmed queued send with protected draft");
+    typeInBuffer(tab, "Latest unsent user draft");
+    Object.defineProperty(tab.dom, "Date", { value: class extends Date {
+      static override now(): number { return Date.now() + 20_000; }
+    }, configurable: true });
+    gate.replay();
+    await waitFor(() => !tab.queue.dispatching, "expired send retains draft recovery", 700);
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.textContent).toBe("Unconfirmed native queued payload");
+    const saved = await persisted();
+    expect(saved.items.find(item => item.id === id)?.status).toBe("review");
+    expect(saved.drafts?.map(entry => entry.text)).toEqual(["Latest unsent user draft"]);
+    expect(tab.shadow.querySelector<HTMLTextAreaElement>('[aria-label="Saved unsent draft"]')?.value).toBe("Latest unsent user draft");
+    gate.replay();
+    expect(native.sent).toEqual([]);
+  });
+
+  test("draft preservation keeps unsaved latest text visible when navigation prevents further journal writes", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Keep the old queue on its own route");
+    draft(tab, "Initial durable draft"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempted = false;
+    tab.after = request => { if (request.action === "attempt") { attempted = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "draft backed up before navigation");
+    tab.before = request => {
+      if (request.action === "draft-save" && request.draftRevision! > 1) throw new Error("The worker rejected a draft write after navigation");
+    };
+    typeInBuffer(tab, "Latest text still only in the visible draft buffer");
+    tab.dom.history.pushState({}, "", "/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    tab.doc.querySelector("main")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    draft(tab, "Another conversation's independent draft");
+    release();
+    await waitFor(() => !tab.queue.dispatching, "interrupted send leaves recovery visible");
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.textContent).toBe("Another conversation's independent draft");
+    const buffer = draftBuffer(tab);
+    expect(buffer?.value).toBe("Latest text still only in the visible draft buffer");
+    expect(buffer?.isConnected).toBe(true);
+    expect(buffer?.getAttribute("aria-label")).toContain("unsent draft");
+    expect((await persisted()).drafts?.map(entry => entry.text)).toEqual(["Initial durable draft"]);
+    const recoveryHost = buffer!.getRootNode() as ShadowRoot;
+    expect(recoveryHost.querySelector('[role="status"]')?.textContent).toContain("could not be saved or restored");
+    const input = new tab.dom.InputEvent("beforeinput", { inputType: "insertText", data: " continued", bubbles: true, cancelable: true });
+    Object.defineProperty(input, "isTrusted", { value: true });
+    expect(tab.composer.dispatchEvent(input as unknown as Event)).toBe(true);
+    draft(tab, "Another conversation's independent draft continued");
+    expect(tab.composer.textContent).toBe("Another conversation's independent draft continued");
+    expect(buffer?.value).toBe("Latest text still only in the visible draft buffer");
+  });
+
+  test("draft preservation keeps both tab drafts while only one tab wins the queued send", async () => {
+    const first = await createTab();
+    await enqueue(first, "Send exactly once across typing tabs");
+    const second = await createTab({ visibility: "hidden" });
+    draft(first, "First tab's own draft"); draft(second, "Second tab's own draft");
+    const firstNative = simulateNativeChat(first), secondNative = simulateNativeChat(second);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const contenders = new Set<Tab>();
+    for (const tab of [first, second]) tab.before = request => {
+      if (request.action === "claim") { contenders.add(tab); return gate; }
+    };
+    busy(first, false); busy(second, false); now += 4000;
+    await waitFor(() => contenders.size === 2, "both typing tabs attempt claim");
+    release();
+    await waitFor(() => firstNative.sent.length + secondNative.sent.length === 1 && !first.queue.dispatching && !second.queue.dispatching, "one cross-tab send completes");
+    expect([...firstNative.sent, ...secondNative.sent]).toEqual(["Send exactly once across typing tabs"]);
+    expect(first.composer.textContent).toBe("First tab's own draft");
+    expect(second.composer.textContent).toBe("Second tab's own draft");
+    expect((await persisted()).drafts).toEqual([]);
+  });
+
+  test("draft preservation waits for native IME composition to finish before borrowing the composer", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Send after IME commits");
+    draft(tab, "入力中"); tab.composer.focus();
+    tab.composer.dispatchEvent(new tab.dom.CompositionEvent("compositionstart", { bubbles: true, composed: true }) as unknown as Event);
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.textContent).toBe("入力中");
+    expect(draftBuffer(tab)).toBeNull();
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("composing");
+    draft(tab, "入力完了");
+    tab.composer.dispatchEvent(new tab.dom.CompositionEvent("compositionend", { bubbles: true, composed: true }) as unknown as Event);
+    await waitFor(() => native.sent.length === 1 && !tab.queue.dispatching, "native composition complete");
+    expect(native.sent).toEqual(["Send after IME commits"]);
+    expect(tab.composer.textContent).toBe("入力完了");
+  });
+
+  test("draft preservation keeps an active buffer IME attached until its composition commits", async () => {
+    const tab = await createTab();
+    await enqueue(tab, "Send while the next draft is composing");
+    draft(tab, "Draft"); tab.composer.focus();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let attempted = false;
+    tab.after = request => { if (request.action === "attempt") { attempted = true; return gate; } };
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await waitFor(() => attempted && Boolean(draftBuffer(tab)), "buffer before composition");
+    const buffer = draftBuffer(tab)!;
+    buffer.dispatchEvent(new tab.dom.CompositionEvent("compositionstart", { bubbles: true, composed: true }) as unknown as Event);
+    typeInBuffer(tab, "編集中");
+    release();
+    await waitFor(() => native.sent.length === 1 && tab.requests.some(request => request.action === "ack"), "queued send acknowledged during IME");
+    expect(buffer.isConnected).toBe(true);
+    expect(tab.queue.dispatching).toBe(true);
+    typeInBuffer(tab, "編集完了");
+    buffer.dispatchEvent(new tab.dom.CompositionEvent("compositionend", { bubbles: true, composed: true }) as unknown as Event);
+    await waitFor(() => !tab.queue.dispatching, "restore after buffer IME ends");
+    expect(tab.composer.textContent).toBe("編集完了");
+    expect(native.sent).toEqual(["Send while the next draft is composing"]);
+  });
+
+  test.each(["<strong>Keep bold formatting</strong>", '<span data-mention-id="person">Keep mention</span>', '<p style="color:red">Keep styled paragraph</p>'])("draft preservation leaves unsupported rich content untouched: %s", async markup => {
+    const tab = await createTab();
+    await enqueue(tab, "Wait for structured draft");
+    tab.composer.innerHTML = markup; tab.composer.focus();
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual([]);
+    expect(tab.composer.innerHTML).toBe(markup);
+    expect(draftBuffer(tab)).toBeNull();
+    expect(tab.requests.filter(request => request.action === "draft-save" || request.action === "attempt")).toHaveLength(0);
+    expect(tab.doc.getElementById("plannotator-message-queue")!.dataset.queueState).toBe("draft");
+  });
+
+  test("draft preservation supports plain paragraphs and preserves a background focus target", async () => {
+    const tab = await createTab({ visibility: "hidden" });
+    await enqueue(tab, "Background queued text");
+    tab.composer.innerHTML = "<p>first line</p><p>second<br>third</p>";
+    const other = tab.doc.createElement("input"); tab.doc.body.append(other); other.focus();
+    const native = simulateNativeChat(tab);
+    busy(tab, false); now += 4000;
+    await poll(tab);
+    expect(native.sent).toEqual(["Background queued text"]);
+    expect(tab.composer.textContent).toBe("first line\nsecond\nthird");
+    expect(tab.doc.activeElement).toBe(other);
   });
 
   test("a persistently failing composer fill stays queued without spinning on change broadcasts", async () => {

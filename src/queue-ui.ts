@@ -1,20 +1,34 @@
 import { QUEUE_MESSAGE_TYPE, getQueueKey, type QueueItem, type QueueState } from "./queue-store";
 import { icon } from "./icons";
 import { getExtensionApi, type ExtensionRuntime } from "./browser-api";
+import { ComposerDraftBuffer } from "./composer-draft-buffer";
 import { NativeReplayGuard } from "./native-replay-guard";
 import {
   findQueueComposer, readComposer, writeComposer, findQueueSendButton, findQueueStopButton,
   isChatBusy, hasComposerAttachments, getVisibleUserMessages,
-  getAssistantCompletionStatusAfter, type AssistantCompletionStatus, getStableUserMessageAnchor, isCurrentConversationReady, getCurrentConversationReadiness,
+  getAssistantCompletionStatusAfter, type AssistantCompletionStatus, getStableUserMessageAnchor, isCurrentConversationReady, getCurrentConversationReadiness, hasVerifiedConversationIdentity,
   registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias,
   isEmptyNewChat, composerScope, getProviderName,
 } from "./chatgpt-dom";
 
 type QueueRuntime = Pick<ExtensionRuntime, "sendMessage" | "onMessage">;
 type QueueHold = "loading" | "empty" | "paused" | "retry-delay" | "editing" | "saving" | "reordering" |
-  "review" | "sending" | "claimed" | "waiting" | "composer-missing" | "draft" | "attachments" |
+  "review" | "sending" | "claimed" | "waiting" | "composer-missing" | "draft" | "composing" | "draft-recovery" | "attachments" |
   "chat-busy" | "anchor-unverified" | "identity-unverified" | "completion-pending" | "transcript-loading" | "ready";
 type QueueCompletionReason = AssistantCompletionStatus | "anchor-unverified" | "not-required";
+
+interface PreservedDraft {
+  id: string;
+  key: string;
+  buffer: ComposerDraftBuffer;
+  writes: Promise<void>;
+  savedRevision: number;
+  submit: boolean;
+  submitTask?: Promise<void>;
+  pendingEnqueue?: { id: string; text: string };
+  original: string;
+  valid: boolean;
+}
 
 const ROOT = "plannotator-message-queue";
 const POLL_MS = 900;
@@ -39,7 +53,10 @@ export class MessageQueue {
   private editRevision = 0;
   private saving = false;
   private dispatching = false;
+  private nativeReleased = false;
   private nativeDispatch = false;
+  private composing = false;
+  private preservedDraft: PreservedDraft | null = null;
   private nativeReplay = new NativeReplayGuard();
   private polling = false;
   private tickPending = false;
@@ -100,6 +117,16 @@ export class MessageQueue {
       if (!composer || !(event.target instanceof HTMLFormElement) || !event.target.contains(composer)) return;
       if (!this.shouldQueue()) { this.captureFirstSend(); return; }
       event.preventDefault(); event.stopImmediatePropagation(); void this.enqueue();
+    }, options);
+    document.addEventListener("compositionstart", event => {
+      const composer = findQueueComposer();
+      if (composer && event.composedPath().includes(composer)) this.composing = true;
+    }, options);
+    document.addEventListener("compositionend", event => {
+      const composer = findQueueComposer();
+      if (composer && event.composedPath().includes(composer)) {
+        this.composing = false; this.scheduleTick();
+      }
     }, options);
     document.addEventListener("input", () => {
       // Native editors may commit after our capture listener. Read their final
@@ -242,6 +269,7 @@ export class MessageQueue {
     this.nativeReplay.finish();
     clearInterval(this.pollTimer); this.observer?.disconnect(); this.abort.abort();
     for (const wake of this.domWaiters) wake();
+    this.preservedDraft?.buffer.destroy();
     this.host.remove();
   }
 
@@ -297,6 +325,10 @@ export class MessageQueue {
     const key = getQueueKey(location.href);
     if (key !== this.key) {
       this.nativeReplay.revoke();
+      this.composing = false;
+      // The backup belongs to the original conversation. Never cover or restore
+      // its text into a newly navigated composer.
+      if (this.preservedDraft) { this.preservedDraft.valid = false; this.preservedDraft.buffer.showRecovery("Draft from your previous conversation. Return there to retry saving, or copy your text before closing this tab."); }
       clearConversationAlias(true);
       if (!this.key && key?.startsWith("chatgpt:") && this.firstSend && !this.firstSend.key && Date.now() < this.firstSend.expiresAt) {
         this.firstSend.key = key;
@@ -438,6 +470,9 @@ export class MessageQueue {
     const composer = findQueueComposer();
     const target = event.composedPath()[0];
     if (!composer || !(target instanceof Node) || !composer.contains(target)) return;
+    if (event.isTrusted && this.preservedDraft?.valid && this.preservedDraft.key === getQueueKey(location.href) && this.preservedDraft.buffer.text.trim()) {
+      event.preventDefault(); event.stopImmediatePropagation(); void this.enqueuePreservedDraft(this.preservedDraft); return;
+    }
     if (event.isTrusted) this.nativeReplay.trustedIntent();
     if (!this.shouldQueue()) { this.captureFirstSend(); return; }
     event.preventDefault(); event.stopImmediatePropagation();
@@ -451,6 +486,9 @@ export class MessageQueue {
     if (replay === "block") { event.preventDefault(); event.stopImmediatePropagation(); return; }
     const send = findQueueSendButton();
     if (!send || !event.composedPath().includes(send)) return;
+    if (event.isTrusted && this.preservedDraft?.valid && this.preservedDraft.key === getQueueKey(location.href) && this.preservedDraft.buffer.text.trim()) {
+      event.preventDefault(); event.stopImmediatePropagation(); void this.enqueuePreservedDraft(this.preservedDraft); return;
+    }
     if (event.isTrusted) this.nativeReplay.trustedIntent();
     if (!this.shouldQueue()) { this.captureFirstSend(); return; }
     event.preventDefault(); event.stopImmediatePropagation();
@@ -458,8 +496,9 @@ export class MessageQueue {
   }
 
   private async enqueue(): Promise<void> {
+    if (this.preservedDraft) { await this.enqueuePreservedDraft(this.preservedDraft); return; }
     if (this.editing) { await this.saveEdit(); return; }
-    if (this.saving || this.dispatching) return;
+    if (this.saving || (this.dispatching && !this.nativeReleased)) return;
     const key = this.syncRoute();
     const composer = findQueueComposer();
     const text = composer ? readComposer(composer) : "";
@@ -512,7 +551,9 @@ export class MessageQueue {
       }
     }
     if (!composer) return "composer-missing";
-    if (readComposer(composer).trim()) return "draft";
+    if (this.composing) return "composing";
+    if (this.preservedDraft) return "draft-recovery";
+    if (readComposer(composer) && !ComposerDraftBuffer.supported(composer)) return "draft";
     if (hasComposerAttachments()) return "attachments";
     if (isChatBusy()) return "chat-busy";
     const anchor = this.state.lastCompletedUserMessageId;
@@ -555,6 +596,178 @@ export class MessageQueue {
     this.host.dataset.queueLastDispatchTime = String(Date.now());
   }
 
+  private async preserveDraft(composer: NonNullable<ReturnType<typeof findQueueComposer>>, key: string): Promise<void> {
+    const session: PreservedDraft = {
+      id: crypto.randomUUID(), key, buffer: null!, writes: Promise.resolve(), savedRevision: 0,
+      submit: false, original: readComposer(composer), valid: true,
+    };
+    session.buffer = new ComposerDraftBuffer(composer, {
+      onChange: () => { void this.savePreservedDraft(session).catch(error => {
+        this.error = `Your draft is still in the temporary input. ${this.describe(error)}`; this.render();
+      }); },
+      onSubmit: () => { void this.enqueuePreservedDraft(session); },
+      onRetry: () => { void this.retryPreservedDraft(session); },
+    });
+    this.preservedDraft = session;
+    session.buffer.start();
+    await this.savePreservedDraft(session);
+  }
+
+  private async retryPreservedDraft(session: PreservedDraft): Promise<void> {
+    if (this.dispatching || this.preservedDraft !== session) return;
+    if (session.key !== this.syncRoute()) {
+      session.buffer.showRecovery("Return to the original conversation to retry saving this draft, or select and copy your text."); return;
+    }
+    try {
+      await this.savePreservedDraft(session);
+      if (session.savedRevision !== session.buffer.revision) return;
+      session.buffer.destroy(); this.preservedDraft = null; this.error = ""; this.render();
+    } catch (error) { session.buffer.showRecovery(`Your draft is still here. ${this.describe(error)}`); }
+  }
+
+  private async enqueuePreservedDraft(session: PreservedDraft): Promise<void> {
+    if (session.submit || !session.valid || session.key !== this.key || session.buffer.composing) return;
+    const text = session.buffer.text;
+    const revision = session.buffer.revision;
+    if (!text.trim()) return;
+    if (!session.pendingEnqueue || session.pendingEnqueue.text !== text) session.pendingEnqueue = { id: crypto.randomUUID(), text };
+    const pending = session.pendingEnqueue;
+    session.submit = true;
+    session.submitTask = (async () => {
+      try {
+        await this.request("enqueue", pending, session.key);
+        session.buffer.clearIfUnchanged(text, revision);
+        session.pendingEnqueue = undefined;
+        this.error = "";
+      } catch (error) { this.error = `Your draft is still in the temporary input. ${this.describe(error)}`; }
+      finally { session.submit = false; this.render(); }
+    })();
+    await session.submitTask;
+  }
+
+  private savePreservedDraft(session: PreservedDraft): Promise<void> {
+    const text = session.buffer.text;
+    const draftRevision = session.buffer.revision;
+    session.writes = session.writes.catch(() => {}).then(async () => {
+      const result = await this.request("draft-save", { id: session.id, text, draftRevision }, session.key);
+      const saved = result.state.drafts?.find(entry => entry.id === session.id);
+      // A successful empty checkpoint atomically retires its recovery record.
+      // Its absence is expected; real text still requires a matching backup.
+      if (!(text === "" && !saved) && (!saved || saved.revision < draftRevision || (saved.revision === draftRevision && saved.text !== text))) {
+        throw new Error("The draft backup could not be verified.");
+      }
+      session.savedRevision = draftRevision;
+    });
+    return session.writes;
+  }
+
+  private async restorePreservedDraft(composer: ReturnType<typeof findQueueComposer>, key: string, payload?: string, clicked = false, observedUserId?: string): Promise<void> {
+    const session = this.preservedDraft;
+    if (!session || session.key !== key) return;
+    let restored = false;
+    let restoredNativeText: string | undefined;
+    const clearDeadline = performance.now() + 1500;
+    const confirmedHere = () => Boolean(observedUserId && hasVerifiedConversationIdentity() &&
+      getVisibleUserMessages().some(message => message.id === observedUserId));
+    const same = () => session.valid && !this.abort.signal.aborted && key === this.syncRoute() && composer?.isConnected &&
+      findQueueComposer() === composer && !hasComposerAttachments() &&
+      (observedUserId ? confirmedHere() : isCurrentConversationReady());
+    for (;;) {
+      // Enter, composition, and typing can start during either persistence or
+      // native-editor reconciliation. Repeat only while we still own the exact
+      // text in the original composer, never over a changed native draft.
+      await session.submitTask;
+      while (session.buffer.composing && key === this.syncRoute() && !this.abort.signal.aborted) await this.waitForDomChange(100);
+      // A posted bubble can precede the provider clearing its native editor.
+      // Retain the editable buffer until that exact, confirmed payload clears;
+      // never clear or replace it ourselves after clicking Send.
+      while (clicked && observedUserId && session.valid && !this.abort.signal.aborted && key === this.syncRoute() &&
+          (session.buffer.text !== "" || session.buffer.composing || session.submit) &&
+          composer?.isConnected && findQueueComposer() === composer && !hasComposerAttachments() &&
+          getVisibleUserMessages().some(message => message.id === observedUserId) &&
+          (readComposer(composer) === "" || readComposer(composer) === payload) && performance.now() < clearDeadline &&
+          ((confirmedHere() && readComposer(composer) === payload) ||
+            (!hasVerifiedConversationIdentity() && getCurrentConversationReadiness() === "loading"))) {
+        this.host.dataset.queueDraftRestore = "waiting-for-native-clear-or-readiness";
+        await this.waitForDomChange(Math.min(100, Math.max(1, clearDeadline - performance.now())));
+      }
+      try { await this.savePreservedDraft(session); } catch { /* Keep the visible buffer as source of truth. */ }
+      if ((session.submit || session.buffer.composing) && key === this.key && !this.abort.signal.aborted) continue;
+      const current = composer && readComposer(composer);
+      const ownedText = restoredNativeText === undefined
+        ? current === "" || (!clicked && (current === payload || current === session.original))
+        : current === restoredNativeText;
+      if (!composer || !same() || this.composing || !ownedText) {
+        this.host.dataset.queueDraftRestore = !composer?.isConnected || findQueueComposer() !== composer ? "composer-changed" :
+          !session.valid || key !== this.key ? "conversation-changed" : hasComposerAttachments() ? "attachments" :
+          this.composing ? "composition" : !ownedText ? "native-text-retained" : "identity-or-loading";
+        break;
+      }
+      const text = session.buffer.text;
+      const revision = session.buffer.revision;
+      session.buffer.beforeNativeWrite();
+      const written = current === text || (writeComposer(composer, text) && readComposer(composer) === text);
+      session.buffer.endNativeWrite();
+      // ProseMirror moves unobserved mutations to a delayed flush on blur.
+      // Let its observer commit while focused before restoring another focus.
+      await this.yieldComposerCommit();
+      if (!written || !same() || readComposer(composer) !== text) {
+        this.host.dataset.queueDraftRestore = "native-restore-changed";
+        session.buffer.refocusAfterNativeWrite(); break;
+      }
+      if (revision !== session.buffer.revision || session.buffer.composing || session.submit) {
+        restoredNativeText = text;
+        session.buffer.refocusAfterNativeWrite(); continue;
+      }
+      restored = session.buffer.restoreSelection();
+      this.host.dataset.queueDraftRestore = restored ? "restored" : "selection-restore-changed";
+      break;
+    }
+    if (restored || session.savedRevision === session.buffer.revision || this.abort.signal.aborted) {
+      const revision = session.buffer.revision;
+      const empty = session.buffer.text === "";
+      session.buffer.destroy(); this.preservedDraft = null;
+      if (restored) {
+        this.nativeReleased = true;
+        if (session.pendingEnqueue) this.pendingSave = { ...session.pendingEnqueue, key };
+        // Input listeners were detached synchronously. Drain every newer save
+        // before removing the exact restored revision, including a save queued
+        // while we awaited the first one.
+        try { await session.writes; } catch { /* Recovery copy remains if deletion fails. */ }
+        try { await this.request("draft-remove", { id: session.id, draftRevision: revision }, key); }
+        catch { /* Keep a visible recovery copy until durable removal succeeds. */ }
+
+      } else if (empty) {
+        try { await session.writes; await this.request("draft-remove", { id: session.id, draftRevision: revision }, key); }
+        catch { /* A failed cleanup retains its recoverable record. */ }
+      } else if (key === this.key) this.error ||= "Your unsent draft is saved below. Clear the native input, then restore it.";
+    } else {
+      session.buffer.showRecovery("Your draft could not be saved or restored. Keep this tab open; return to the original conversation to retry saving, or copy your text.");
+      this.error = "Your draft is still in the temporary input because it could not be saved or restored. Keep this tab open.";
+    }
+  }
+
+  private async restoreSavedDraft(id: string): Promise<void> {
+    const originalKey = this.key;
+    const key = this.syncRoute();
+    // A recovery-only card can outlive SPA navigation until the next poll.
+    // Never carry its old entry into the newly synchronized conversation.
+    if (!key || key !== originalKey) { this.render(); this.scheduleTick(); return; }
+    const entry = this.state?.drafts?.find(draft => draft.id === id);
+    const composer = findQueueComposer();
+    if (!entry || !key || !composer || this.dispatching || this.saving) return;
+    if (readComposer(composer) || hasComposerAttachments() || !isCurrentConversationReady()) {
+      this.error = "Clear the current input in this conversation before restoring the saved draft."; this.render(); return;
+    }
+    this.saving = true;
+    try {
+      if (!writeComposer(composer, entry.text) || readComposer(composer) !== entry.text) throw new Error("The editor could not restore the draft. Its saved copy is still available.");
+      await this.request("draft-remove", { id, draftRevision: entry.revision }, key);
+      this.error = "";
+    } catch (error) { this.error = this.describe(error); }
+    finally { this.saving = false; this.render(); }
+  }
+
   private async dispatch(sendNowId?: string): Promise<void> {
     if (this.dispatching || this.saving || this.editing) return;
     const sendNow = Boolean(sendNowId);
@@ -575,21 +788,23 @@ export class MessageQueue {
         this.render(); return;
       }
     }
-    this.dispatching = true;
+    this.dispatching = true; this.nativeReleased = false;
     this.host.dataset.reloadBlocked = "true";
     const key = this.key!;
     let item: QueueItem | undefined;
     let attempted = false;
     let postedUserMessageId: string | undefined;
+    let observedUserMessageId: string | undefined;
     let composer: ReturnType<typeof findQueueComposer> = null;
     let clicked = false;
+    let filledByQueue = false;
     try {
       item = (await this.request(sendNow ? "steer" : "claim", sendNow ? { id: sendNowId } : { afterUserMessageId: this.state?.lastCompletedUserMessageId }, key)).claimed;
       if (!item) return;
       this.error = ""; this.render();
       composer = findQueueComposer();
       if (key !== this.syncRoute() || !composer || !isCurrentConversationReady() ||
-          readComposer(composer).trim() || hasComposerAttachments()) {
+          (sendNow && readComposer(composer).trim()) || this.composing || hasComposerAttachments()) {
         await this.request("release", { id: item.id }, key); return;
       }
       if (sendNow && isChatBusy()) {
@@ -608,15 +823,31 @@ export class MessageQueue {
       }
       const ready = () => sendNow ? isCurrentConversationReady() : this.transcriptReady();
       composer = findQueueComposer();
-      if (key !== this.syncRoute() || !composer || readComposer(composer).trim() || isChatBusy() ||
+      if (key !== this.syncRoute() || !composer || (sendNow && readComposer(composer).trim()) || this.composing || isChatBusy() ||
           !ready() || hasComposerAttachments()) {
         await this.request("release", { id: item.id }, key); return;
       }
       const before = new Set(getVisibleUserMessages().map(message => message.id));
-      if (!writeComposer(composer, item.text)) throw new Error("Could not fill the composer. The message remains saved.");
-      // Yield for the native composer commit, then wait only while Send is not
-      // ready instead of adding a fixed delay to every queued message.
+      // The user's editable buffer is separate from the native payload until
+      // native consumption is observed. This also permits delayed send replay.
+      if (readComposer(composer) || composer.contains(document.activeElement)) {
+        if (!ComposerDraftBuffer.supported(composer)) throw new Error("This formatted draft cannot be preserved automatically. Queue or clear it to continue.");
+        await this.preserveDraft(composer, key);
+        if (this.abort.signal.aborted || key !== this.syncRoute() || findQueueComposer() !== composer ||
+            !ready() || isChatBusy() || hasComposerAttachments() || this.composing ||
+            readComposer(composer) !== this.preservedDraft?.original) throw new Error("The input changed while preserving your draft. The message remains queued.");
+      }
+      this.preservedDraft?.buffer.beforeNativeWrite();
+      filledByQueue = true;
+      const filled = writeComposer(composer, item.text);
+      this.preservedDraft?.buffer.endNativeWrite();
+      // Do not blur the native editor before its observer reconciles the new
+      // DOM into the model read by Send. A blur can defer that commit by 20ms;
+      // merely observing the requested DOM text is not proof of that commit.
       await this.yieldComposerCommit();
+      this.preservedDraft?.buffer.refocusAfterNativeWrite();
+      this.preservedDraft?.buffer.position();
+      if (!filled) throw new Error("Could not fill the composer. The message remains saved.");
       const composerDeadline = Date.now() + 1000;
       while (!findQueueSendButton() && Date.now() < composerDeadline && key === this.syncRoute() &&
           !this.abort.signal.aborted && !isChatBusy() && composer.isConnected && normalize(readComposer(composer)) === normalize(item.text)) {
@@ -663,6 +894,7 @@ export class MessageQueue {
       while (!this.abort.signal.aborted && Date.now() < deadline && key === this.syncRoute()) {
         const posted = getVisibleUserMessages().find(message => !before.has(message.id) && normalize(message.text) === normalize(item!.text));
         if (posted) {
+          observedUserMessageId = posted.id;
           this.temporaryAnchors.add(posted.id);
           postedUserMessageId = getStableUserMessageAnchor(posted.id) ?? posted.id;
           await this.request("ack", { id: item.id, userMessageId: postedUserMessageId }, key);
@@ -700,17 +932,22 @@ export class MessageQueue {
           // Persisted claims recover; attempted sends never auto-retry.
         }
       }
-      if (!clicked && composer?.isConnected && key === this.key && item && normalize(readComposer(composer)) === normalize(item.text)) {
+      if (!clicked && filledByQueue && !hasComposerAttachments() && composer?.isConnected && key === this.key && item && normalize(readComposer(composer)) === normalize(item.text)) {
+        this.preservedDraft?.buffer.beforeNativeWrite();
         writeComposer(composer, "");
+        this.preservedDraft?.buffer.endNativeWrite();
+        await this.yieldComposerCommit();
+        this.preservedDraft?.buffer.refocusAfterNativeWrite();
       }
       this.error = this.describe(error);
     } finally {
       this.nativeReplay.finish();
+      await this.restorePreservedDraft(composer, key, item?.text, clicked, observedUserMessageId);
       // Releasing a failed claim broadcasts a change and clearing its draft
       // emits input. Neither should immediately retry the same failed fill.
       // Successful sends have no cooldown; only pre-send failures back off.
       if (item && !attempted) this.retryAfter = Date.now() + 1000;
-      this.dispatching = false; this.render(); if (this.tickPending) this.scheduleTick();
+      this.dispatching = false; this.nativeReleased = false; this.render(); if (this.tickPending) this.scheduleTick();
     }
   }
 
@@ -729,6 +966,7 @@ export class MessageQueue {
       case "cancel-edit": await this.cancelEdit(); break;
       case "retry": if (id) await this.retryItem(id); break;
       case "resolve": if (id) await this.change("remove", { id }); break;
+      case "restore-draft": if (id) await this.restoreSavedDraft(id); break;
       case "check": this.error = ""; this.lastPoll = 0; await this.tick(); break;
     }
   }
@@ -869,13 +1107,16 @@ export class MessageQueue {
   }
 
   private render(): void {
-    this.host.dataset.reloadBlocked = String(this.saving || this.dispatching || Boolean(this.editing) || Boolean(this.dragId) || Boolean(this.pointerDrag));
+    this.host.dataset.reloadBlocked = String(this.saving || this.dispatching || Boolean(this.editing) || Boolean(this.dragId) || Boolean(this.pointerDrag) || Boolean(this.preservedDraft));
     const composer = findQueueComposer();
     // Confirmed sends leave the visible queue immediately. Keep their durable
     // response anchors internally so every tab still waits before sending next.
     const allItems = this.state?.items ?? [];
     const items = allItems.filter(item => item.status !== "waiting");
     const draft = composer ? readComposer(composer).trim() : "";
+    // Older workers may briefly return an empty checkpoint during activation.
+    // It has no recoverable text and must never appear as a disabled composer.
+    const savedDrafts = (this.state?.drafts ?? []).filter(entry => entry.text !== "" && entry.id !== this.preservedDraft?.id);
     if (composer && !draft && !hasComposerAttachments() && [SEND_DRAFT_WARNING, EDIT_DRAFT_WARNING].includes(this.error)) this.error = "";
     const busy = isChatBusy();
     const completionReason = this.completionReason();
@@ -908,7 +1149,9 @@ export class MessageQueue {
     // Put useful holds beside the next queued item. Routine busy/paused state
     // stays in the native response and Pause/Resume control, without a footer.
     const waiting = this.error || recovery || this.dispatching ? "" :
-      hold === "draft" ? "Queue or clear your draft to continue." :
+      hold === "draft" ? "Queue or clear this formatted draft to continue." :
+      hold === "composing" ? "Finishing your current character…" :
+      hold === "draft-recovery" ? "Your draft is still open in the temporary input." :
       hold === "attachments" ? "Send or remove your attachment to continue." :
       hold === "identity-unverified" ? "ChatGPT's temporary conversation ID is not linked to this saved chat. Reopen this conversation to reconnect the queue." :
       !busy && (hold === "completion-pending" || hold === "waiting")
@@ -922,14 +1165,14 @@ export class MessageQueue {
                 ? "Waiting for this conversation to finish loading."
                 : completionReason === "busy" ? `${getProviderName()} is still finishing this response.` : "" :
       hold === "transcript-loading" ? "Waiting for this conversation to finish loading." : "";
-    if (!this.key || !composer || (!items.length && !showAdd && !this.error && !this.state?.paused)) {
+    if (!this.key || !composer || (!items.length && !showAdd && !this.error && !this.state?.paused && !savedDrafts.length)) {
       this.host.style.display = "none";
       this.panel.replaceChildren(); this.signature = "";
       return;
     }
     if (!this.host.isConnected) document.body.append(this.host);
     this.host.style.display = "block";
-    const signature = JSON.stringify([items, this.state?.paused, showAdd, this.saving, this.editingBusy, this.dispatching, this.expanded, this.editing, this.error, recovery, waiting]);
+    const signature = JSON.stringify([items, this.state?.paused, showAdd, this.saving, this.editingBusy, this.dispatching, this.expanded, this.editing, this.error, recovery, waiting, savedDrafts]);
     if (signature !== this.signature && !this.dragId && !this.pointerDrag) {
       this.signature = signature;
       this.panel.innerHTML = `<header>
@@ -939,7 +1182,8 @@ export class MessageQueue {
       </header>
       ${this.expanded && items.length ? `<ol>${items.map((item, index) => this.itemHtml(item, index, index === items.findIndex(entry => entry.status === "queued") ? waiting : "")).join("")}</ol>` : ""}
       ${this.error ? `<div class="error" role="status">${escapeHtml(this.error)} <button data-action="check">Check again</button></div>` :
-        recovery ? `<div class="error" role="status">${recovery}</div>` : ""}`;
+        recovery ? `<div class="error" role="status">${recovery}</div>` : ""}
+      ${savedDrafts.map(entry => `<div class="error" data-id="${escapeHtml(entry.id)}"><label>Saved unsent draft<textarea readonly aria-label="Saved unsent draft">${escapeHtml(entry.text)}</textarea></label><button data-action="restore-draft" ${this.dispatching || this.saving ? "disabled" : ""}>Restore draft</button></div>`).join("")}`;
     }
     this.position();
   }
@@ -959,6 +1203,7 @@ export class MessageQueue {
   private position(): void {
     const composer = findQueueComposer();
     if (!composer) return;
+    this.preservedDraft?.buffer.position();
     const anchor = composerScope(composer) ?? composer;
     const rect = anchor.getBoundingClientRect();
     if (rect.bottom <= 0 || rect.top >= innerHeight) { this.host.style.display = "none"; return; }

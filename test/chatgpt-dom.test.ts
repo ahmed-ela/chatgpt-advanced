@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, getAssistantCompletionStatusAfter, registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias, type ConversationAlias, type AssistantCompletionStatus } from "../src/chatgpt-dom";
+import { findQueueComposer, findQueueSendButton, findQueueStopButton, readComposer, writeComposer, isChatBusy, hasComposerAttachments, getVisibleUserMessages, isCurrentConversationReady, hasVerifiedConversationIdentity, getCurrentConversationReadiness, isEmptyNewChat, getAssistantCompletionAfter, getAssistantCompletionStatusAfter, registerNewConversationAlias, clearConversationAlias, getVerifiedConversationAlias, restoreConversationAlias, type ConversationAlias, type AssistantCompletionStatus } from "../src/chatgpt-dom";
 
 let dom: Window;
 let document: Document;
@@ -59,6 +59,44 @@ describe("queue DOM adapter", () => {
     expect(findQueueComposer()?.matches("[data-composer-markdown]")).toBe(true);
     expect(findQueueSendButton()?.getAttribute("aria-label")).toBe("Send prompt");
     expect(isCurrentConversationReady()).toBe(true);
+  });
+
+  test.each(["assistant-streaming", "assistant-busy", "response-status"] as const)("verified identity permits draft restoration during %s without authorizing dispatch", signal => {
+    const assistant = document.querySelector("[data-markdown-text-style='assistant-message']")!;
+    if (signal === "assistant-streaming") assistant.setAttribute("data-is-streaming", "true");
+    if (signal === "assistant-busy") assistant.setAttribute("aria-busy", "true");
+    if (signal === "response-status") document.querySelector("main")!.insertAdjacentHTML("beforeend", '<span role="status" aria-busy="true">Thinking</span>');
+    expect(hasVerifiedConversationIdentity()).toBe(true);
+    expect(isCurrentConversationReady()).toBe(false);
+    expect(getCurrentConversationReadiness()).toBe("loading");
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("busy");
+  });
+
+  test.each(["main-busy", "route-spinner", "missing-composer", "wrong-route", "mixed-marker", "missing-marker"] as const)("restoration identity still rejects %s", signal => {
+    if (signal === "main-busy") document.querySelector("main")!.setAttribute("aria-busy", "true");
+    if (signal === "route-spinner") document.querySelector("main")!.insertAdjacentHTML("beforeend", '<div data-testid="conversation-loading-spinner">Loading conversation</div>');
+    if (signal === "missing-composer") findQueueComposer()!.remove();
+    if (signal === "wrong-route") dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    if (signal === "mixed-marker") document.querySelector("[data-chatgpt-selection-message-id='assistant-1']")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    if (signal === "missing-marker") document.querySelectorAll("[data-chatgpt-selection-conversation-id]").forEach(element => element.removeAttribute("data-chatgpt-selection-conversation-id"));
+    expect(hasVerifiedConversationIdentity()).toBe(false);
+  });
+
+  test("restoration identity never infers an unverified temporary alias during generation", () => {
+    document.querySelectorAll("[data-chatgpt-selection-conversation-id]").forEach(element => element.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:cccccccc-cccc-4ccc-8ccc-cccccccccccc"));
+    document.querySelector("[data-markdown-text-style='assistant-message']")!.setAttribute("data-is-streaming", "true");
+    expect(hasVerifiedConversationIdentity()).toBe(false);
+    expect(isCurrentConversationReady()).toBe(false);
+  });
+
+  test("restoration during generation retains an exact witnessed alias and rejects a changed marker", () => {
+    localConversation();
+    expect(registerNewConversationAlias(`chatgpt:${id}`, "First question.")).toBe(true);
+    document.querySelector("[data-markdown-text-style='assistant-message']")!.setAttribute("data-is-streaming", "true");
+    expect(hasVerifiedConversationIdentity()).toBe(true);
+    expect(isCurrentConversationReady()).toBe(false);
+    document.querySelector("[data-chatgpt-selection-message-id='assistant-1']")!.setAttribute("data-chatgpt-selection-conversation-id", "local-chatgpt:dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+    expect(hasVerifiedConversationIdentity()).toBe(false);
   });
 
   test.each(["Stop", "Stop generating", "STOP GENERATING", "Stop streaming", "Stop generating response…", "Pause", "Pause response"])("never mistakes %s on composer-submit-button for send", (label) => {
@@ -542,6 +580,61 @@ describe("queue DOM adapter", () => {
     expect(isChatBusy()).toBe(true);
     document.querySelector("[data-markdown-animated]")!.setAttribute("data-chatgpt-selection-message-id", "finished");
     expect(isChatBusy()).toBe(false);
+  });
+
+  function historicalTertiaryStatus(): HTMLElement {
+    currentCompletedTurn();
+    document.querySelector("main")!.insertAdjacentHTML("afterbegin", `<div id="historical-status-turn" data-talvt-turn-state="complete"><div>
+      <div data-chatgpt-search-unit-key="fallback-turn-7:0:user" data-chatgpt-search-message-ids="d41785aa-ba58-48f2-8a5f-5401d841becb"><div data-user-message-bubble="true">Earlier image planning request.</div></div>
+      <div><span hidden data-chatgpt-agent-turn-start></span><div><div><div><div><div data-markdown-text-style="assistant-message" data-markdown-text-tone="tertiary">Completed auxiliary status.</div></div></div></div></div></div>
+    </div></div><div id="historical-image-turn" data-talvt-turn-state="complete">
+      <div data-chatgpt-search-unit-key="image-user:user" data-chatgpt-search-message-ids="e41785aa-ba58-48f2-8a5f-5401d841becb"><div data-user-message-bubble="true">Earlier image generation request.</div></div>
+      <div data-chatgpt-selection-message-id="image-assistant" data-chatgpt-selection-conversation-id="${id}"><div data-markdown-text-style="assistant-message"><img alt="Generated image"></div></div>
+    </div>`);
+    return document.querySelector<HTMLElement>("#historical-status-turn [data-markdown-text-tone='tertiary']")!;
+  }
+
+  test.each(["visible", "hidden"] as const)("historical completed tertiary status does not hold a later completed text turn while %s", visibility => {
+    historicalTertiaryStatus();
+    Object.defineProperty(document, "visibilityState", { value: visibility, configurable: true });
+    expect(isChatBusy()).toBe(false);
+    expect(getAssistantCompletionStatusAfter("user-1")).toBe("complete");
+    // No status wording participates in the decision.
+    document.querySelector("[data-markdown-text-tone='tertiary']")!.textContent = "Different localized status";
+    expect(isChatBusy()).toBe(false);
+  });
+
+  test.each([
+    ["nontertiary body", () => document.querySelector("[data-markdown-text-tone='tertiary']")!.removeAttribute("data-markdown-text-tone")],
+    ["uncompleted historical turn", () => document.querySelector("#historical-status-turn")!.setAttribute("data-talvt-turn-state", "unknown")],
+    ["missing historical user", () => document.querySelector("#historical-status-turn [data-chatgpt-search-unit-key]")!.remove()],
+    ["latest toolbar missing", () => document.querySelector(".response-actions")!.remove()],
+    ["latest toolbar hidden", () => document.querySelector<HTMLElement>(".response-actions")!.hidden = true],
+    ["latest state missing", () => document.querySelector("main > [data-talvt-turn-state]:last-of-type")!.removeAttribute("data-talvt-turn-state")],
+    ["latest assistant uncommitted", () => document.querySelector("[data-chatgpt-selection-message-id='assistant-1']")!.removeAttribute("data-chatgpt-selection-message-id")],
+    ["newer unanswered user", () => document.querySelector("main")!.insertAdjacentHTML("beforeend", '<div data-message-author-role="user" data-message-id="new-user">Unanswered request.</div>')],
+    ["wrong route", () => dom.happyDOM.setURL("https://chatgpt.com/c/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")],
+    ["mixed identity", () => document.querySelector("[data-chatgpt-selection-message-id='image-assistant']")!.setAttribute("data-chatgpt-selection-conversation-id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")],
+    ["active Stop", () => document.querySelector("[data-composer-body]")!.insertAdjacentHTML("beforeend", '<button aria-label="Stop generating">Stop</button>')],
+    ["active response status", () => document.querySelector("main")!.insertAdjacentHTML("beforeend", '<span role="status" aria-busy="true">Responding</span>')],
+    ["animated tertiary status", () => document.querySelector("[data-markdown-text-tone='tertiary']")!.setAttribute("data-markdown-animated", "")],
+  ] as Array<[string, () => void]>)("historical tertiary exception still holds for %s", (_, mutate) => {
+    historicalTertiaryStatus(); mutate();
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("a tertiary body in the current turn is not authorized by its existing completion controls", () => {
+    currentCompletedTurn();
+    document.querySelector(".answer-area")!.insertAdjacentHTML("afterbegin", '<div data-markdown-text-style="assistant-message" data-markdown-text-tone="tertiary">Current status with no ID.</div>');
+    expect(isChatBusy()).toBe(true);
+    expect(getAssistantCompletionAfter("user-1")).toBe(false);
+  });
+
+  test("an idless tertiary status after the last completed turn is still unfinished", () => {
+    const status = historicalTertiaryStatus();
+    document.querySelector("main")!.append(status.closest("[data-talvt-turn-state]")!);
+    expect(isChatBusy()).toBe(true);
   });
 
   function completedTurnWithAnimatedThought(): void {
