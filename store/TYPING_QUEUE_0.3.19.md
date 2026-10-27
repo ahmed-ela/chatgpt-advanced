@@ -6,7 +6,7 @@ Date: October 26, 2026 (America/Los_Angeles).
 
 The corrected local Chrome build passed a native ChatGPT test after the user reloaded 0.3.19. Two queued prompts sent exactly once, in order, while an unfinished draft remained editable. Both rows disappeared, both queued prompts received complete replies, and the complete unfinished draft returned to the native input. It was not posted or left in recovery.
 
-Conversation: https://chatgpt.com/c/6adefcfb-fafc-832b-97d4-e0703011dcbe
+Live verification used an isolated native ChatGPT conversation. Local evidence is referenced below.
 
 - Posted prompts: `TL0319_FINAL_A: Give one short idempotency example.` and `TL0319_FINAL_B: Give one short retry example.`
 - Final input: `UNSENT_TL0319_FINAL_DRAFT: this unfinished note must remain in the input. Continued typing before delivery.`

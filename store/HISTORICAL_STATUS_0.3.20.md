@@ -4,7 +4,7 @@ Date: October 26, 2026 (America/Los_Angeles).
 
 ## Live reproduction
 
-Reported conversation: https://chatgpt.com/c/6adfd6de-9234-8325-a2a7-773f6e56810d
+The reported native ChatGPT conversation was inspected directly. Local evidence is referenced below.
 
 The page had no visible Stop control, no streaming/aria-busy markers, and all visible turn wrappers were marked complete. Its current answer had normal completed response actions. Nevertheless, Threadlane reported `queueWorkerBusy=true`.
 

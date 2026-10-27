@@ -34,7 +34,7 @@ The user reloaded 0.3.18. A fresh native ChatGPT test at Extra High sent `TL0318
 
 The draft remained intact in the saved recovery card instead of returning to the native input. This exposed a separate restoration guard defect: response-generation markers make the general conversation-readiness check false after a successful send. Regressions reproduce that case, as well as acknowledgement preceding native input clearing. The follow-up correction is tracked in `TYPING_QUEUE_0.3.19.md`; 0.3.18 is not the final candidate for this task.
 
-Native test: https://chatgpt.com/c/6adef992-4370-832f-9f83-4d32c7b7283e. The visible diagnostic counter reached two confirmed sends and empty queue, with the original draft in its recovery card. The installed ten files were byte-identical to the immutable 0.3.18 ZIP at activation.
+The native test used an isolated ChatGPT conversation. The visible diagnostic counter reached two confirmed sends and empty queue, with the original draft in its recovery card. The installed ten files were byte-identical to the immutable 0.3.18 ZIP at activation.
 
 Final Chrome candidate: `.local/release/0.3.18/threadlane-0.3.18.zip`.
 

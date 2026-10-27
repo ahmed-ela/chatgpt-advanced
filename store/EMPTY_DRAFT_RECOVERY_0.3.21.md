@@ -4,7 +4,7 @@ Date: October 27, 2026 (America/Los_Angeles).
 
 ## Observed user state
 
-Conversation: https://chatgpt.com/c/6ae1208b-e840-832c-ac3f-a1b8830ec151
+The affected native ChatGPT conversation was inspected directly.
 
 The live queue was empty, route identity was verified, and the worker was not busy. A blank, read-only “Saved unsent draft” textarea had focus above the empty native composer. The saved textarea's DOM value and text were both exactly empty. This was an unusable recovery input, not evidence of a pending queued send. Current DOM state cannot establish which earlier interruption left that record behind.
 
@@ -31,7 +31,7 @@ The UI accepts the absent record only after a successful empty-save response. Ve
 
 The user reloaded 0.3.21, then the affected chat was refreshed with an empty composer. It has no recovery card, an empty queue, verified provider identity, and no busy hold.
 
-Isolated test: https://chatgpt.com/c/6ae12407-6d10-8329-b825-49434e3c382b
+A separate native ChatGPT conversation was used for isolated verification.
 
 Extra High was visibly selected. `TL0321_QUEUE_A: Reply with exactly EMPTY_CHECKPOINT_OK.` was queued while the setup response ran, leaving the native input focused and empty. The queue automatically posted that prompt once, reported one confirmed send and `queueDraftRestore=restored`, then removed the row. No recovery draft remained. After refreshing, the transcript still contained that prompt exactly once and the queue/recovery UI stayed empty.
 
