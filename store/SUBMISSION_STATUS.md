@@ -2,7 +2,25 @@
 
 Latest public verification: **October 27, 2026, America/Los_Angeles**. The [public Threadlane listing](https://chromewebstore.google.com/detail/threadlane/fgajmfkookghcacddnmhfkamefndgfei) shows **0.3.16**, updated **October 26, 2026**, with its installation control available. This supersedes the earlier Pending review status for 0.3.16 below.
 
-**0.3.22 is prepared for the next update; upload/submission is not yet confirmed.** Its Chrome ZIP SHA-256 is `fd20e336fa4266c008e65e13ec595bc631ce7e6610c7ae9141da97d0151693c8`. The hosted privacy disclosure has been updated and read back; [RELEASE_0.3.22.md](RELEASE_0.3.22.md) records qualification and its live-testing limits. Version 0.3.21 is superseded locally by the additional cross-conversation Restore guard.
+**Version 0.3.22 was submitted successfully and is Pending review**, confirmed on **October 27, 2026 at 15:42 PDT (22:42:35.155 UTC)**. Automatic publication after approval is enabled; **0.3.16 remains the published version**. [RELEASE_0.3.22.md](RELEASE_0.3.22.md) records qualification and its live-testing limits. Version 0.3.21 was superseded by the additional cross-conversation Restore guard.
+
+## Current public update submission 0.3.22
+
+- Publisher/account: Threadlane, `threadlane.support@gmail.com`; the dashboard identified Google Account **Threadlane Support**.
+- Existing public item ID: `fgajmfkookghcacddnmhfkamefndgfei`.
+- Store revision: `00010`; pending draft package: **0.3.22**; published package: **0.3.16**.
+- Google displayed **Your extension was submitted for review**; the package page separately confirmed **Pending review**, version 0.3.22, and revision 00010.
+- Automatic publication after approval: checked before final submission.
+- Distribution: **Public**, **Free of charge**, and **All regions**, verified and retained.
+- The listing description was updated for draft preservation. Existing flame icons and the three provider screenshots were retained. The hosted privacy policy was updated and read back before submission.
+
+Submitted candidate: `.local/release/0.3.22/threadlane-0.3.22.zip`.
+
+SHA-256: `fd20e336fa4266c008e65e13ec595bc631ce7e6610c7ae9141da97d0151693c8`.
+
+Source [PR #13](https://github.com/ahmed-ela/chatgpt-advanced/pull/13) was squash-merged as `31d583100508423c010509047d14ea0182538988`. The recorded qualification run passed **864 tests**; the final route guard is regression-tested, while earlier installed Chrome evidence and Firefox fixtures retain the limits described in the release report. This submission does not establish installed 0.3.22 qualification or change either Firefox channel.
+
+Local evidence under `outputs/release-0.3.22/`: `chrome-submission.json`, `chrome-submission-success-ax.txt`, `chrome-pending-package-0.3.22-ax.txt`, `chrome-auto-publication-ax.txt`, and `chrome-distribution-before-submit-ax.txt`, and `chrome-submitted-listing-ax.txt`, with the associated screenshots. `chrome-submitted-flame-icon.png` records the retained flame artwork. The receipt records confirmation at `2026-10-27T22:42:35.155Z`. Approval and public availability of 0.3.22 remain unverified.
 
 ## Historical October 25–26 verification
 
@@ -18,7 +36,7 @@ The submitted **0.3.15 production package** clears successfully transferred repl
 
 The earlier public-listing check confirmed 0.3.6 was available on October 7; that historical evidence is preserved in `/Users/ahmedelamin/Documents/Codex/2026-10-03/do-x20/outputs/threadlane-publication-check-2026-10-07/public-listing-ax.txt`. The authorized publication email was confirmed sent on **2026-10-07 at 12:37:49.851 UTC**, and the completed daily publication automation was deleted. The separate notification record is `outputs/threadlane-publication-monitor.json` in the originating workspace.
 
-## Current public update submission 0.3.16
+## Historical October 25 submission of the now-public 0.3.16 update
 
 - Publisher/account: Threadlane, `threadlane.support@gmail.com`.
 - Existing public item ID: `fgajmfkookghcacddnmhfkamefndgfei`.

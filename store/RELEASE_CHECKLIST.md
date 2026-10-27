@@ -2,7 +2,18 @@
 
 Unchecked items are release gates, not claims that checks have passed. Record the tested commit, version, ZIP hash, browser version, provider, date, and observed result when completing them. Public distribution is authorized and still requires store review. [Chrome distribution guidance](https://developer.chrome.com/docs/webstore/cws-dashboard-distribution/).
 
-Latest public listing check: **0.3.16 is published**, updated October 26 and verified October 27, 2026 (America/Los_Angeles). **0.3.22 is prepared; new submission is not yet confirmed.** [RELEASE_0.3.22.md](RELEASE_0.3.22.md) records qualification scope, including 864 passing tests and the distinction between prior installed Chrome evidence and Firefox/other-provider fixtures. [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) tracks the separate review/publication gates. The reusable checks below do not claim every operation was repeated for this patch.
+Latest public listing check: **0.3.16 is published**, updated October 26 and verified October 27, 2026 (America/Los_Angeles). **0.3.22 was submitted October 27 at 15:42 PDT and is Pending review, revision 00010, with automatic publication after approval enabled.** [RELEASE_0.3.22.md](RELEASE_0.3.22.md) records qualification scope, including 864 passing tests and the distinction between prior installed Chrome evidence and Firefox/other-provider fixtures. [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md) tracks the separate review/publication gates. The reusable checks below do not claim every operation was repeated for this patch.
+
+## Recorded 0.3.22 release and submission
+
+- [x] Source [PR #13](https://github.com/ahmed-ela/chatgpt-advanced/pull/13) squash-merged as `31d583100508423c010509047d14ea0182538988`; 864 tests passed, with TypeScript, version consistency, and package validation checks.
+- [x] Exact Chrome candidate submitted: SHA-256 `fd20e336fa4266c008e65e13ec595bc631ce7e6610c7ae9141da97d0151693c8`; hosted privacy disclosure updated and read back.
+- [x] Correct Threadlane Support publisher account and existing public item confirmed. Listing description updated; icons and three provider screenshots retained. Public/free/all-regions distribution retained.
+- [x] Successful submission and Pending review read back for draft 0.3.22/revision 00010 at `2026-10-27T22:42:35.155Z`; automatic publication checkbox was selected. Published version remains 0.3.16.
+- [ ] Verify 0.3.22 approval and public installation availability after review.
+- [ ] Verify the installed public 0.3.22 build on the supported providers. Prior installed Chrome results and Firefox fixtures are not fresh exact-candidate qualification.
+
+Firefox 0.3.22 remains locally prepared; this Chrome submission did not sign, submit, or distribute either Firefox channel. Local receipt and UI evidence are under `outputs/release-0.3.22/`; see [SUBMISSION_STATUS.md](SUBMISSION_STATUS.md).
 
 ## Recorded 0.3.15 qualification
 

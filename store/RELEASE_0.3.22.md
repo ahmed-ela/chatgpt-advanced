@@ -4,6 +4,14 @@ Date: October 27, 2026 (America/Los_Angeles).
 
 This release includes the accumulated 0.3.17–0.3.21 draft-preservation, historical-completion, and empty-recovery fixes plus a final navigation guard. Queued messages can send while a plain-text draft remains editable and recoverable. Native editor model reconciliation precedes focus restoration and Send. Completed historical clarification statuses no longer hold the whole chat busy, and empty checkpoints retire atomically instead of becoming unusable recovery inputs.
 
+## Chrome submission
+
+Chrome Web Store submission was confirmed **October 27, 2026 at 15:42 PDT (22:42:35.155 UTC)** for the existing public item `fgajmfkookghcacddnmhfkamefndgfei`, using `threadlane.support@gmail.com` (**Threadlane Support**). The dashboard shows **Pending review**, draft **0.3.22**, revision **00010**, and published version **0.3.16**. Automatic publication after approval was checked. Public/free/all-regions distribution, existing icons, and the three provider screenshots were retained; the description was updated for draft preservation.
+
+Source [PR #13](https://github.com/ahmed-ela/chatgpt-advanced/pull/13) was squash-merged as `31d583100508423c010509047d14ea0182538988`. The submitted ZIP matches the SHA-256 below. Local evidence includes `outputs/release-0.3.22/chrome-submission.json`, `chrome-submission-success-ax.txt`, `chrome-pending-package-0.3.22-ax.txt`, `chrome-auto-publication-ax.txt`, and `chrome-distribution-before-submit-ax.txt`.
+
+This confirms submission, not approval or public availability of 0.3.22. It does not establish a fresh installed 0.3.22 test or change the prepared Firefox channels.
+
 ## Final review correction
 
 A recovery-only queue can retain its Restore card until the next poll after SPA navigation. The earlier Restore handler captured its saved entry before synchronizing the route, so a stale card could insert the prior conversation's draft into the new chat's native composer. The regression reproduced that write after real mutation microtasks and before the next poll.
